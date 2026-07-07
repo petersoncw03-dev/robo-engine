@@ -154,6 +154,24 @@ async function startEngine() {
         await client.connect();
         console.log("🔥 Robo-Engine (Motor de Sinais) conectado ao PostgreSQL!");
 
+        // --- WARMUP (PREENCHER HISTÓRICO) ---
+        try {
+            console.log("⏳ Iniciando Warmup: Buscando últimas 2000 pedras...");
+            const res = await client.query('SELECT id, color, roll, timestamp FROM results ORDER BY timestamp DESC LIMIT 2000');
+            const rows = res.rows.reverse(); // Queremos as pedras na ordem cronológica
+            for (const row of rows) {
+                history.push({
+                    id: row.id,
+                    timestamp: row.timestamp instanceof Date ? row.timestamp.toISOString() : row.timestamp,
+                    color: row.color,
+                    roll: parseInt(row.roll)
+                });
+            }
+            console.log(`✅ Warmup concluído: ${history.length} pedras em memória.`);
+        } catch (err) {
+            console.error("⚠️ Erro no warmup (banco vazio?):", err);
+        }
+
         await client.query('LISTEN nova_pedra');
         console.log("👂 Escutando canal 'nova_pedra'...");
 
@@ -203,8 +221,8 @@ async function startEngine() {
                         mestreState = { status: 'standby', step: 0, level: 0, stones: [] };
                     }
 
-                    // Se encontrou gatilho e aprovação da IA
-                    if (levelPoints >= 1 && iaApproved) {
+                    // Se encontrou gatilho e a confluência validou (levelPoints assumiu o valor)
+                    if (levelPoints >= 1) {
                         mestreState = {
                             status: 'active',
                             step: 1,
