@@ -211,7 +211,9 @@ async function startEngine() {
                     if (isBranco) {
                         mestreState.status = 'win';
                         placarDiario.wins++;
-                        messagesTelegram.push(`🎯 <b>GREEEN NO MESTRE!</b> 💰\n\nPegamos o BRANCO na ${mestreState.step}ª entrada!\nNível da operação: 🔥 ${mestreState.level}\n\n<i>Lucro garantido! Que venha o próximo!</i> 🚀`);
+                        if (mestreState.level >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA) {
+                            messagesTelegram.push(`🎯 <b>GREEEN NO MESTRE!</b> 💰\n\nPegamos o BRANCO na ${mestreState.step}ª entrada!\nNível da operação: 🔥 ${mestreState.level}\n\n<i>Lucro garantido! Que venha o próximo!</i> 🚀`);
+                        }
                     } else {
                         if (mestreState.step < 6) {
                             mestreState.step++; // Avança no Gale
@@ -228,7 +230,9 @@ async function startEngine() {
                         } else {
                             mestreState.status = 'loss';
                             placarDiario.losses++;
-                            messagesTelegram.push(`❌ <b>RED NO MESTRE</b> 📉\n\nInfelizmente o branco não veio nas 6 entradas de proteção.\n\n<i>Mantenha a calma e siga o gerenciamento à risca! O mercado é feito de ciclos, o próximo será nosso!</i> 💪`);
+                            if (mestreState.level >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA) {
+                                messagesTelegram.push(`❌ <b>RED NO MESTRE</b> 📉\n\nInfelizmente o branco não veio nas 6 entradas de proteção.\n\n<i>Mantenha a calma e siga o gerenciamento à risca! O mercado é feito de ciclos, o próximo será nosso!</i> 💪`);
+                            }
                         }
                     }
                 } else {
