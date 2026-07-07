@@ -154,6 +154,10 @@ async function startEngine() {
         await client.connect();
         console.log("🔥 Robo-Engine (Motor de Sinais) conectado ao PostgreSQL!");
 
+        // Criar tabela de estado se não existir
+        await client.query('CREATE TABLE IF NOT EXISTS engine_state (id INT PRIMARY KEY, state JSONB)');
+        await client.query('INSERT INTO engine_state (id, state) VALUES (1, \'{}\') ON CONFLICT (id) DO NOTHING');
+
         // --- WARMUP (PREENCHER HISTÓRICO) ---
         try {
             console.log("⏳ Iniciando Warmup: Buscando últimas 2000 pedras...");
@@ -258,18 +262,21 @@ async function startEngine() {
                 // TODO: Adicionar futuramente o envio do alerta isolado de IA (iaTelegramSignal)
 
                 // 5. Notify para o Frontend e API
-                // Empacotamos o estado e disparamos para a Vercel distribuir via SSE
+                // Empacotamos o estado
                 const estadoMotor = {
                     mestreState,
                     placarDiario,
                     timestamp: new Date().toISOString(),
-                    // Enviamos também as features extraídas para renderizar gráficos instantaneamente no front
                     radarData: calcResult.engineState.radarData,
                     iaData: calcResult.engineState.iaData
                 };
 
-                // NOTIFY no Postgres - o Frontend (Vercel) recebe e passa limpo para os clientes
-                await client.query('NOTIFY estado_motor, $1', [JSON.stringify(estadoMotor)]);
+                // O payload JSON completo ultrapassa 8KB e crasha o NOTIFY do Postgres!
+                // Solução: Salvar o estado em uma tabela e avisar o Front para ler de lá.
+                await client.query('UPDATE engine_state SET state = $1 WHERE id = 1', [JSON.stringify(estadoMotor)]);
+                
+                // NOTIFY no Postgres - apenas sinalizando que há um novo estado
+                await client.query('NOTIFY estado_motor');
             }
         });
 
