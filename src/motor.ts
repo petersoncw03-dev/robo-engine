@@ -5,20 +5,16 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 // ============================================================================
-// BLOCO 2: REGRAS DO TELEGRAM E PLACAR DA MEIA-NOITE
+// TELEGRAM
 // ============================================================================
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || '';
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
 
-// Inicialização do Bot do Telegram
 const bot = TELEGRAM_TOKEN ? new TelegramBot(TELEGRAM_TOKEN, { polling: false }) : null;
 
 const REGRAS_TELEGRAM = {
     // Enviar sinal apenas se Nível de Força for >= 2
     MESTRE_FORCA_MINIMA: 2,
-    // (Qtd de entradas >= 2 AND Winrate >= 80%) OU (Qtd de entradas >= 3 AND Winrate >= 60%)
-    IA_REGRA_1: { minEntradas: 2, minWinrate: 80 },
-    IA_REGRA_2: { minEntradas: 3, minWinrate: 60 }
 };
 
 async function sendTelegramMessage(text: string) {
@@ -34,7 +30,7 @@ async function sendTelegramMessage(text: string) {
 }
 
 // ============================================================================
-// BLOCO 1: GERENCIAMENTO DE MEMÓRIA E ESTADO (ANTI-TRAVAMENTO CPU)
+// ESTADO E MEMÓRIA
 // ============================================================================
 interface RollData {
     id: string;
@@ -43,22 +39,25 @@ interface RollData {
     roll: number;
 }
 
-// "Sliding Window" - Máximo de 2000 pedras na memória RAM
-const MAX_HISTORY = 2000;
-const history: RollData[] = [];
-
 interface MestreState {
     status: 'standby' | 'active' | 'win' | 'loss';
     step: number;
     level: number;
     stones: number[];
+    // FIX #1: Rastrear se este sinal foi anunciado no Telegram
+    wasAnnounced: boolean;
 }
+
+// "Sliding Window" - Máximo de 2000 pedras na memória RAM
+const MAX_HISTORY = 2000;
+const history: RollData[] = [];
 
 let mestreState: MestreState = {
     status: 'standby',
     step: 0,
     level: 0,
-    stones: []
+    stones: [],
+    wasAnnounced: false,
 };
 
 let placarDiario = {
@@ -71,10 +70,8 @@ function checkMidnightReset() {
     const today = new Date().getDate();
     if (placarDiario.lastResetDate !== today) {
         if (placarDiario.wins > 0 || placarDiario.losses > 0) {
-            sendTelegramMessage(`🌙 <b>Resumo do Dia - RoboBlaze</b>\n\n✅ Vitórias (Wins): ${placarDiario.wins}\n❌ Derrotas (Losses): ${placarDiario.losses}`);
+            sendTelegramMessage(`🌙 <b>Resumo do Dia - RoboBlaze</b>\n\n✅ Vitórias: ${placarDiario.wins}\n❌ Derrotas: ${placarDiario.losses}`);
         }
-        
-        // Resetando o placar para o novo dia
         placarDiario.wins = 0;
         placarDiario.losses = 0;
         placarDiario.lastResetDate = today;
@@ -83,105 +80,139 @@ function checkMidnightReset() {
 }
 
 // ============================================================================
-// BLOCO 3: TRANSIÇÃO DOS ALGORITMOS (FRONT -> BACKEND)
+// ENGINES
 // ============================================================================
 import { calculateRadar } from './engines/radarEngine';
 import { calculateIA } from './engines/iaEngine';
 
 function processAlgorithms(newRoll: RollData) {
-    // 1. Manter a Janela Deslizante de 2.000 pedras
+    // Manter a Janela Deslizante
     history.push(newRoll);
     if (history.length > MAX_HISTORY) {
         history.shift();
     }
 
-    // Precisamos de histórico para prever (warmup)
     if (history.length < 50) return null;
 
     const isBranco = newRoll.color.toLowerCase().includes('branco') || newRoll.roll === 0;
-    
-    // --- LÓGICAS REAIS (IMPORTADAS DAS ENGINES) ---
-    
-    // 1. Radar Engine (Mestre de Confluência: Padrões, Zonas Quentes, Casas Exatas)
+
     const radarData = calculateRadar(history);
     let points = radarData.radarPoints;
 
-    // 2. IA Engine (Minutos Quentes, Cruzamentos, Zero Absoluto)
     const iaData = calculateIA(history);
-    let iaApproved = iaData.iaApproved;
+    const iaApproved = iaData.iaApproved;
 
-    // Regra de Aprovação Completa do Mestre:
-    // Pelo menos 1 gatilho radar E ser validado por IA ou Zonas Quentes
+    // Regra de Aprovação: Pelo menos 1 gatilho radar E validado por IA ou Zonas Quentes
     let finalMestreApproved = false;
     if (points >= 1 && (iaApproved || radarData.hasZonasQuentes)) {
         finalMestreApproved = true;
     } else {
-        // Se a IA não aprovou, descartamos
-        points = 0; 
-    }
-
-    // --- REGRAS IA (MINUTOS) PARA TELEGRAM (OPCIONAL/FUTURO) ---
-    // (Ainda é possível rastrear winrate de estratégias ativas do IA)
-    let iaTelegramSignal = false;
-    let iaWinrate = 85; // mock para alertas isolados
-    let iaEntradas = 2; // mock para alertas isolados
-    
-    if ((iaEntradas >= REGRAS_TELEGRAM.IA_REGRA_1.minEntradas && iaWinrate >= REGRAS_TELEGRAM.IA_REGRA_1.minWinrate) ||
-        (iaEntradas >= REGRAS_TELEGRAM.IA_REGRA_2.minEntradas && iaWinrate >= REGRAS_TELEGRAM.IA_REGRA_2.minWinrate)) {
-        iaTelegramSignal = true; 
+        points = 0;
     }
 
     return {
         levelPoints: finalMestreApproved ? points : 0,
-        iaApproved: finalMestreApproved,
         isBranco,
-        iaTelegramSignal,
-        iaWinrate,
-        iaEntradas,
-        engineState: { radarData, iaData } // Exportamos para o Front ter visibilidade
+        engineState: { radarData, iaData }
     };
 }
 
 // ============================================================================
-// BLOCO 4: EVENT LOOP E POSTGRESQL LISTEN + BLOCO 5: NOTIFY
+// FIX #1: Persistência do estado no banco para sobreviver a restarts
+// ============================================================================
+async function salvarEstadoNoBanco(pgClient: Client, estadoMotor: object) {
+    try {
+        await pgClient.query(
+            'UPDATE engine_state SET state = $1 WHERE id = 1',
+            [JSON.stringify(estadoMotor)]
+        );
+    } catch (err) {
+        console.error('Erro ao salvar estado no banco:', err);
+    }
+}
+
+async function restaurarEstadoDoBanco(pgClient: Client) {
+    try {
+        const res = await pgClient.query('SELECT state FROM engine_state WHERE id = 1');
+        if (res.rows.length > 0 && res.rows[0].state) {
+            const saved = res.rows[0].state;
+            if (saved.mestreState && saved.mestreState.status !== 'standby') {
+                mestreState = saved.mestreState;
+                console.log(`♻️  Estado restaurado: status=${mestreState.status}, step=${mestreState.step}, level=${mestreState.level}, announced=${mestreState.wasAnnounced}`);
+            }
+            if (saved.placarDiario) {
+                placarDiario = saved.placarDiario;
+            }
+        }
+    } catch (err) {
+        console.error('Erro ao restaurar estado do banco:', err);
+    }
+}
+
+// ============================================================================
+// FIX #5: Reconexão automática ao banco
 // ============================================================================
 async function startEngine() {
-    const client = new Client({
-        connectionString: process.env.DATABASE_URL
+    while (true) {
+        try {
+            await runEngine();
+        } catch (error) {
+            console.error('Motor caiu, reiniciando em 5s...', error);
+            await sendTelegramMessage('⚠️ <b>Motor reiniciando</b> — Reconectando ao banco em 5 segundos...');
+        }
+        await new Promise(res => setTimeout(res, 5000));
+    }
+}
+
+async function runEngine() {
+    const client = new Client({ connectionString: process.env.DATABASE_URL });
+
+    await client.connect();
+    console.log('🔥 Robo-Engine conectado ao PostgreSQL!');
+
+    // Criar tabela de estado se não existir
+    await client.query('CREATE TABLE IF NOT EXISTS engine_state (id INT PRIMARY KEY, state JSONB)');
+    await client.query("INSERT INTO engine_state (id, state) VALUES (1, '{}') ON CONFLICT (id) DO NOTHING");
+
+    // FIX #1: Restaurar estado antes de começar
+    await restaurarEstadoDoBanco(client);
+
+    // Warmup
+    try {
+        console.log('⏳ Buscando últimas 2000 pedras...');
+        const res = await client.query('SELECT id, color, roll, timestamp FROM results ORDER BY timestamp DESC LIMIT 2000');
+        const rows = res.rows.reverse();
+        for (const row of rows) {
+            history.push({
+                id: row.id,
+                timestamp: row.timestamp instanceof Date ? row.timestamp.toISOString() : row.timestamp,
+                color: row.color,
+                roll: parseInt(row.roll)
+            });
+        }
+        console.log(`✅ Warmup: ${history.length} pedras em memória.`);
+    } catch (err) {
+        console.error('⚠️ Erro no warmup:', err);
+    }
+
+    await client.query('LISTEN nova_pedra');
+    console.log("👂 Escutando 'nova_pedra'...");
+
+    // FIX #5: Detectar desconexão silenciosa e lançar erro para reiniciar
+    client.on('error', (err) => {
+        console.error('Erro no cliente PostgreSQL:', err);
+        throw err;
     });
 
-    try {
-        await client.connect();
-        console.log("🔥 Robo-Engine (Motor de Sinais) conectado ao PostgreSQL!");
+    client.on('end', () => {
+        throw new Error('Conexão com PostgreSQL encerrada inesperadamente');
+    });
 
-        // Criar tabela de estado se não existir
-        await client.query('CREATE TABLE IF NOT EXISTS engine_state (id INT PRIMARY KEY, state JSONB)');
-        await client.query('INSERT INTO engine_state (id, state) VALUES (1, \'{}\') ON CONFLICT (id) DO NOTHING');
-
-        // --- WARMUP (PREENCHER HISTÓRICO) ---
-        try {
-            console.log("⏳ Iniciando Warmup: Buscando últimas 2000 pedras...");
-            const res = await client.query('SELECT id, color, roll, timestamp FROM results ORDER BY timestamp DESC LIMIT 2000');
-            const rows = res.rows.reverse(); // Queremos as pedras na ordem cronológica
-            for (const row of rows) {
-                history.push({
-                    id: row.id,
-                    timestamp: row.timestamp instanceof Date ? row.timestamp.toISOString() : row.timestamp,
-                    color: row.color,
-                    roll: parseInt(row.roll)
-                });
-            }
-            console.log(`✅ Warmup concluído: ${history.length} pedras em memória.`);
-        } catch (err) {
-            console.error("⚠️ Erro no warmup (banco vazio?):", err);
-        }
-
-        await client.query('LISTEN nova_pedra');
-        console.log("👂 Escutando canal 'nova_pedra'...");
-
+    await new Promise<void>((_, reject) => {
         client.on('notification', async (msg) => {
-            if (msg.channel === 'nova_pedra' && msg.payload) {
-                // Checagem de Meia-Noite
+            if (msg.channel !== 'nova_pedra' || !msg.payload) return;
+
+            try {
                 checkMidnightReset();
 
                 const payload = JSON.parse(msg.payload);
@@ -192,81 +223,118 @@ async function startEngine() {
                     roll: parseInt(payload.roll)
                 };
 
-                // Deduplicação (Evita que atualizações no banco processem a mesma pedra 2x no Motor)
+                // Deduplicação: ignorar a mesma pedra processada duas vezes
                 if (history.length > 0 && history[history.length - 1].id === newRoll.id) {
                     return;
                 }
 
                 const calcResult = processAlgorithms(newRoll);
-                if (!calcResult) return; // Ainda em warmup
+                if (!calcResult) return;
 
-                const { levelPoints, iaApproved, isBranco, iaTelegramSignal, iaWinrate, iaEntradas } = calcResult;
+                const { levelPoints, isBranco } = calcResult;
 
-                let messagesTelegram: string[] = [];
+                const messagesTelegram: string[] = [];
 
-                // --- MÁQUINA DE ESTADOS: MESTRE DE CONFLUÊNCIA ---
+                // ── MÁQUINA DE ESTADOS ─────────────────────────────────────
                 if (mestreState.status === 'active') {
                     mestreState.stones.push(newRoll.roll);
-                    
+
                     if (isBranco) {
+                        // WIN
                         mestreState.status = 'win';
                         placarDiario.wins++;
-                        if (mestreState.level >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA) {
+                        // FIX #2: Só comemora se o sinal foi anunciado
+                        if (mestreState.wasAnnounced) {
                             messagesTelegram.push(`🎯 <b>GREEEN NO MESTRE!</b> 💰\n\nPegamos o BRANCO na ${mestreState.step}ª entrada!\nNível da operação: 🔥 ${mestreState.level}\n\n<i>Lucro garantido! Que venha o próximo!</i> 🚀`);
                         }
+                        // Aguarda 7s e busca novo sinal imediatamente
+                        setTimeout(async () => {
+                            mestreState = { status: 'standby', step: 0, level: 0, stones: [], wasAnnounced: false };
+                            if (history.length > 0) {
+                                const lastRoll = history[history.length - 1];
+                                const recheck = processAlgorithms(lastRoll);
+                                if (recheck && recheck.levelPoints >= 1) {
+                                    const deveAnunciar = recheck.levelPoints >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA;
+                                    mestreState = { status: 'active', step: 1, level: recheck.levelPoints, stones: [], wasAnnounced: deveAnunciar };
+                                    if (deveAnunciar) {
+                                        await sendTelegramMessage(`🚨 <b>NOVO SINAL DO MESTRE</b> 🚨\n\n🔥 <b>Nível de Força: ${recheck.levelPoints}</b>\n\n<i>Gerenciamento é tudo, siga o plano!</i>`);
+                                        await sendTelegramMessage(`👉 <b>Entrar no branco agora! 1/6</b>`);
+                                    }
+                                }
+                            }
+                        }, 7000);
                     } else {
                         if (mestreState.step < 6) {
-                            mestreState.step++; // Avança no Gale
-                            
-                            // Dispara a mensagem se a operação já tem força suficiente
-                            if (mestreState.level >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA || levelPoints >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA) {
-                                // Upgrade de sinal durante as entradas
+                            mestreState.step++;
+
+                            // FIX #2: Só avisa próxima entrada se o sinal foi anunciado
+                            if (mestreState.wasAnnounced) {
+                                // Upgrade de nível → reinicia da entrada 1
                                 if (levelPoints > mestreState.level) {
                                     mestreState.level = levelPoints;
-                                    messagesTelegram.push(`⚡ <b>SINAL UPGRADE!</b>\nComeçaremos a fazer novas entradas com força total! O nível subiu para 🔥 <b>${mestreState.level}</b>.`);
+                                    mestreState.step = 1; // ← Volta para 1/6
+                                    messagesTelegram.push(`⚡ <b>SINAL UPGRADE! Nível ${mestreState.level}</b>\nForça aumentou! Começando do zero nas entradas.`);
+                                    messagesTelegram.push(`👉 <b>Entrar no branco agora! 1/6</b>`);
+                                } else {
+                                    messagesTelegram.push(`👉 <b>Entrar no branco agora! ${mestreState.step}/6</b>`);
                                 }
-                                messagesTelegram.push(`👉 <b>Entrar no branco agora! ${mestreState.step}/6</b>`);
                             }
                         } else {
+                            // LOSS: chegou na pedra 7 sem branco
                             mestreState.status = 'loss';
                             placarDiario.losses++;
-                            if (mestreState.level >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA) {
+                            // FIX #2: Só avisa loss se o sinal foi anunciado
+                            if (mestreState.wasAnnounced) {
                                 messagesTelegram.push(`❌ <b>RED NO MESTRE</b> 📉\n\nInfelizmente o branco não veio nas 6 entradas de proteção.\n\n<i>Mantenha a calma e siga o gerenciamento à risca! O mercado é feito de ciclos, o próximo será nosso!</i> 💪`);
                             }
+                            // Aguarda 7s e busca novo sinal imediatamente (sem precisar de nova pedra)
+                            setTimeout(async () => {
+                                mestreState = { status: 'standby', step: 0, level: 0, stones: [], wasAnnounced: false };
+                                if (history.length > 0) {
+                                    const lastRoll = history[history.length - 1];
+                                    const recheck = processAlgorithms(lastRoll);
+                                    if (recheck && recheck.levelPoints >= 1) {
+                                        const deveAnunciar = recheck.levelPoints >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA;
+                                        mestreState = { status: 'active', step: 1, level: recheck.levelPoints, stones: [], wasAnnounced: deveAnunciar };
+                                        if (deveAnunciar) {
+                                            await sendTelegramMessage(`🚨 <b>NOVO SINAL DO MESTRE</b> 🚨\n\n🔥 <b>Nível de Força: ${recheck.levelPoints}</b>\n\n<i>Gerenciamento é tudo, siga o plano!</i>`);
+                                            await sendTelegramMessage(`👉 <b>Entrar no branco agora! 1/6</b>`);
+                                        }
+                                    }
+                                }
+                            }, 7000);
                         }
                     }
                 } else {
-                    // Após win ou loss, garantimos que volte para standby se vier nova pedra antes de um sinal
+                    // Limpa estado de win/loss anterior para aceitar novo sinal
                     if (mestreState.status === 'win' || mestreState.status === 'loss') {
-                        mestreState = { status: 'standby', step: 0, level: 0, stones: [] };
+                        mestreState = { status: 'standby', step: 0, level: 0, stones: [], wasAnnounced: false };
                     }
 
-                    // Se encontrou gatilho e a confluência validou (levelPoints assumiu o valor)
+                    // FIX #2: Só ativa operação para level >= 1, mas só anuncia se >= MESTRE_FORCA_MINIMA
                     if (levelPoints >= 1) {
+                        const deveAnunciar = levelPoints >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA;
                         mestreState = {
                             status: 'active',
                             step: 1,
                             level: levelPoints,
-                            stones: []
+                            stones: [],
+                            wasAnnounced: deveAnunciar, // ← Chave que resolve tudo
                         };
 
-                        // Bloco 2: Mestre de Confluência - Enviar sinal apenas se Nível de Força for >= 2 (ou 3)
-                        if (levelPoints >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA) {
+                        if (deveAnunciar) {
                             messagesTelegram.push(`🚨 <b>SINAL DO MESTRE DE CONFLUÊNCIA</b> 🚨\n\n🔥 <b>Nível de Força: ${levelPoints}</b>\n\n<i>Gerenciamento é tudo, siga o plano!</i>`);
                             messagesTelegram.push(`👉 <b>Entrar no branco agora! 1/6</b>`);
                         }
                     }
                 }
 
-                // Disparo das Mensagens no Telegram
-                for (const msg of messagesTelegram) {
-                    await sendTelegramMessage(msg);
+                // Enviar mensagens
+                for (const m of messagesTelegram) {
+                    await sendTelegramMessage(m);
                 }
 
-                // TODO: Adicionar futuramente o envio do alerta isolado de IA (iaTelegramSignal)
-
-                // 5. Notify para o Frontend e API
-                // Empacotamos o estado
+                // Montar estado para o frontend
                 const estadoMotor = {
                     mestreState,
                     placarDiario,
@@ -275,19 +343,19 @@ async function startEngine() {
                     iaData: calcResult.engineState.iaData
                 };
 
-                // O payload JSON completo ultrapassa 8KB e crasha o NOTIFY do Postgres!
-                // Solução: Salvar o estado em uma tabela e avisar o Front para ler de lá.
-                await client.query('UPDATE engine_state SET state = $1 WHERE id = 1', [JSON.stringify(estadoMotor)]);
-                
-                // NOTIFY no Postgres - apenas sinalizando que há um novo estado
+                // FIX #1: Salvar estado completo no banco (sobrevive a restarts)
+                await salvarEstadoNoBanco(client, estadoMotor);
+
+                // Notificar frontend via SSE
                 await client.query('NOTIFY estado_motor');
+
+            } catch (err) {
+                console.error('Erro ao processar pedra:', err);
+                reject(err); // FIX #5: Propaga para reiniciar o motor
             }
         });
-
-    } catch (error) {
-        console.error("Erro fatal no Event Loop do Motor:", error);
-    }
+    });
 }
 
-// Inicia o motor
+// Inicia o motor com reconexão automática
 startEngine();

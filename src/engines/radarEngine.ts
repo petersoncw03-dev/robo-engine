@@ -9,7 +9,10 @@ export function calculateRadar(history: RollData[]) {
     const zonesStats = calculateZones(history);
     const radarStats = calculatePatternsAndCasas(history);
 
-    const hasZonasQuentes = zonesStats.blocks.some((b: any) => b.status === 'ativo' && b.winrate >= 30);
+    // Regra dupla: 35% em 1h (250 pedras), fallback 35% em 2h (500 pedras)
+    const hasZonasQuentes1h = zonesStats.blocks1h.some((b: any) => b.status === 'ativo' && b.winrate >= 35 && b.total >= 3);
+    const hasZonasQuentes2h = !hasZonasQuentes1h && zonesStats.blocks2h.some((b: any) => b.status === 'ativo' && b.winrate >= 35 && b.total >= 5);
+    const hasZonasQuentes = hasZonasQuentes1h || hasZonasQuentes2h;
     const hasCasas = radarStats.topCasas?.some((c: any) => c.isLive && c.target === 'B');
     const hasPatterns = [4, 5, 6].some(t => {
         const pat = radarStats.livePatterns[t];
@@ -27,6 +30,8 @@ export function calculateRadar(history: RollData[]) {
     return {
         radarPoints,
         hasZonasQuentes,
+        hasZonasQuentes1h,
+        hasZonasQuentes2h,
         hasCasas,
         hasPatterns,
         radarStats,
@@ -34,11 +39,7 @@ export function calculateRadar(history: RollData[]) {
     };
 }
 
-function calculateZones(history: RollData[]) {
-    // Cerca de 3h = 750 pedras
-    const sliceAmount = -750;
-    const rolls = history.slice(sliceAmount);
-    
+function calcZoneBlocks(rolls: RollData[]) {
     const whiteIndices = rolls.reduce((acc, r, i) => {
         if (r.color?.toLowerCase().includes('branco') || r.roll === 0) acc.push(i);
         return acc;
@@ -84,8 +85,24 @@ function calculateZones(history: RollData[]) {
     return { blocks, currentGap };
 }
 
+function calculateZones(history: RollData[]) {
+    const rolls1h = history.slice(-120);  // 1 hora exata (2 pedras/min × 60 min)
+    const rolls2h = history.slice(-240);  // 2 horas exatas (2 pedras/min × 120 min)
+
+    const r1h = calcZoneBlocks(rolls1h);
+    const r2h = calcZoneBlocks(rolls2h);
+
+    // Exporta os dois para que o radarEngine possa decidir qual usar
+    return {
+        blocks: r2h.blocks,       // compatibilidade com frontend (usa 2h como padrão)
+        blocks1h: r1h.blocks,
+        blocks2h: r2h.blocks,
+        currentGap: r2h.currentGap
+    };
+}
+
 function calculatePatternsAndCasas(history: RollData[]) {
-    const sliceAmount = -1000; // Últimas ~4 horas
+    const sliceAmount = -480; // 4 horas exatas (2 pedras/min × 240 min)
     const h2h = history.slice(sliceAmount);
     if (h2h.length === 0) return { livePatterns: {} as any, topCasas: [] as any[] };
 
