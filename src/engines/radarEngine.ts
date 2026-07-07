@@ -67,11 +67,25 @@ function calcZoneBlocks(rolls: RollData[]) {
     const blocks = zones.map(z => {
         let wins = 0;
         let losses = 0;
+        const outcomes: ('W' | 'L')[] = [];
+
         for (const g of gaps) {
-            if (g >= z.s && g <= z.e) wins++;
-            else if (g > z.e) losses++;
+            if (g >= z.s && g <= z.e) { wins++; outcomes.push('W'); }
+            else if (g > z.e) { losses++; outcomes.push('L'); }
         }
-        if (currentGap >= z.e) losses++;
+        if (currentGap >= z.e) { losses++; outcomes.push('L'); }
+
+        // Calcular ciclos (agrupamento de W/L consecutivos)
+        const cycles: { type: 'W' | 'L', count: number }[] = [];
+        for (const out of outcomes) {
+            if (cycles.length === 0) {
+                cycles.push({ type: out, count: 1 });
+            } else {
+                const last = cycles[cycles.length - 1];
+                if (last.type === out) last.count++;
+                else cycles.push({ type: out, count: 1 });
+            }
+        }
 
         const total = wins + losses;
         const winrate = total > 0 ? (wins / total) * 100 : 0;
@@ -79,7 +93,7 @@ function calcZoneBlocks(rolls: RollData[]) {
         if (nextEnt >= z.s && nextEnt <= z.e) status = 'ativo';
         else if (nextEnt > z.e) status = 'passou';
 
-        return { ...z, wins, losses, total, winrate, status };
+        return { ...z, wins, losses, total, winrate, status, cycles: cycles.slice(-7) };
     });
 
     return { blocks, currentGap };
