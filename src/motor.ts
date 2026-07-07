@@ -204,15 +204,28 @@ async function startEngine() {
                         mestreState.status = 'win';
                         placarDiario.wins++;
                         triggerTelegram = true;
-                        messageTelegram = `✅ <b>WIN DO MESTRE!</b> 🎯\nVitória no branco na ${mestreState.step}ª entrada!\nNível de Força Inicial: ${mestreState.level}`;
+                        messageTelegram = `🎯 <b>GREEEN NO MESTRE!</b> 💰\n\nPegamos o BRANCO na ${mestreState.step}ª entrada!\nNível da operação: 🔥 ${mestreState.level}\n\n<i>Lucro garantido! Que venha o próximo!</i> 🚀`;
                     } else {
                         if (mestreState.step < 6) {
                             mestreState.step++; // Avança no Gale
+                            
+                            // Upgrade de sinal durante as entradas
+                            let upgradeMsg = "";
+                            if (levelPoints > mestreState.level) {
+                                mestreState.level = levelPoints;
+                                upgradeMsg = `\n\n⚡ <b>SINAL UPGRADE!</b>\nComeçaremos a fazer novas entradas com força total! O nível subiu para 🔥 <b>${mestreState.level}</b>.`;
+                            }
+
+                            // Dispara a mensagem se estiver no nível exigido
+                            if (mestreState.level >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA) {
+                                triggerTelegram = true;
+                                messageTelegram = `⚠️ <b>ENTRADA ${mestreState.step}/6</b> ⚠️\n\👉 Entrar para o <b>BRANCO</b> agora!${upgradeMsg}`;
+                            }
                         } else {
                             mestreState.status = 'loss';
                             placarDiario.losses++;
                             triggerTelegram = true;
-                            messageTelegram = `❌ <b>LOSS DO MESTRE</b> ⚠️\nRed após as 6 entradas de proteção.\nNível de Força Inicial: ${mestreState.level}`;
+                            messageTelegram = `❌ <b>RED NO MESTRE</b> 📉\n\nInfelizmente o branco não veio nas 6 entradas de proteção.\n\n<i>Mantenha a calma e siga o gerenciamento à risca! O mercado é feito de ciclos, o próximo será nosso!</i> 💪`;
                         }
                     }
                 } else {
@@ -233,7 +246,7 @@ async function startEngine() {
                         // Bloco 2: Mestre de Confluência - Enviar sinal apenas se Nível de Força for >= 2 (ou 3)
                         if (levelPoints >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA) {
                             triggerTelegram = true;
-                            messageTelegram = `🚨 <b>SINAL DO MESTRE DE CONFLUÊNCIA</b> 🚨\n\n🔥 <b>Nível de Força: ${levelPoints}</b>\n👉 Entre para o <b>BRANCO</b> nas próximas 6 pedras!\n\n<i>Gerenciamento é tudo, siga o plano!</i>`;
+                            messageTelegram = `🚨 <b>SINAL DO MESTRE DE CONFLUÊNCIA</b> 🚨\n\n🔥 <b>Nível de Força: ${levelPoints}</b>\n\n👉 <b>Entrar no BRANCO agora! (Entrada 1/6)</b>\n\n<i>Gerenciamento é tudo, siga o plano!</i>`;
                         }
                     }
                 }
