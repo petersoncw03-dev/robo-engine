@@ -85,6 +85,22 @@ function checkMidnightReset() {
 import { calculateRadar } from './engines/radarEngine';
 import { calculateIA } from './engines/iaEngine';
 
+// Lê o histórico atual sem modificá-lo (usado no recheck pós win/loss)
+function recheckSignal() {
+    if (history.length < 50) return null;
+    const radarData = calculateRadar(history);
+    const iaData = calculateIA(history);
+    let points = radarData.radarPoints;
+    const iaApproved = iaData.iaApproved;
+    let finalApproved = false;
+    if (points >= 1 && (iaApproved || radarData.hasZonasQuentes)) {
+        finalApproved = true;
+    } else {
+        points = 0;
+    }
+    return { levelPoints: finalApproved ? points : 0, engineState: { radarData, iaData } };
+}
+
 function processAlgorithms(newRoll: RollData) {
     // Manter a Janela Deslizante
     history.push(newRoll);
@@ -247,19 +263,16 @@ async function runEngine() {
                         if (mestreState.wasAnnounced) {
                             messagesTelegram.push(`🎯 <b>GREEEN NO MESTRE!</b> 💰\n\nPegamos o BRANCO na ${mestreState.step}ª entrada!\nNível da operação: 🔥 ${mestreState.level}\n\n<i>Lucro garantido! Que venha o próximo!</i> 🚀`);
                         }
-                        // Aguarda 7s e busca novo sinal imediatamente
+                        // Aguarda 7s e busca novo sinal sem modificar o histórico
                         setTimeout(async () => {
                             mestreState = { status: 'standby', step: 0, level: 0, stones: [], wasAnnounced: false };
-                            if (history.length > 0) {
-                                const lastRoll = history[history.length - 1];
-                                const recheck = processAlgorithms(lastRoll);
-                                if (recheck && recheck.levelPoints >= 1) {
-                                    const deveAnunciar = recheck.levelPoints >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA;
-                                    mestreState = { status: 'active', step: 1, level: recheck.levelPoints, stones: [], wasAnnounced: deveAnunciar };
-                                    if (deveAnunciar) {
-                                        await sendTelegramMessage(`🚨 <b>NOVO SINAL DO MESTRE</b> 🚨\n\n🔥 <b>Nível de Força: ${recheck.levelPoints}</b>\n\n<i>Gerenciamento é tudo, siga o plano!</i>`);
-                                        await sendTelegramMessage(`👉 <b>Entrar no branco agora! 1/6</b>`);
-                                    }
+                            const recheck = recheckSignal();
+                            if (recheck && recheck.levelPoints >= 1) {
+                                const deveAnunciar = recheck.levelPoints >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA;
+                                mestreState = { status: 'active', step: 1, level: recheck.levelPoints, stones: [], wasAnnounced: deveAnunciar };
+                                if (deveAnunciar) {
+                                    await sendTelegramMessage(`🚨 <b>NOVO SINAL DO MESTRE</b> 🚨\n\n🔥 <b>Nível de Força: ${recheck.levelPoints}</b>\n\n<i>Gerenciamento é tudo, siga o plano!</i>`);
+                                    await sendTelegramMessage(`👉 <b>Entrar no branco agora! 1/6</b>`);
                                 }
                             }
                         }, 7000);
@@ -287,19 +300,16 @@ async function runEngine() {
                             if (mestreState.wasAnnounced) {
                                 messagesTelegram.push(`❌ <b>RED NO MESTRE</b> 📉\n\nInfelizmente o branco não veio nas 6 entradas de proteção.\n\n<i>Mantenha a calma e siga o gerenciamento à risca! O mercado é feito de ciclos, o próximo será nosso!</i> 💪`);
                             }
-                            // Aguarda 7s e busca novo sinal imediatamente (sem precisar de nova pedra)
+                            // Aguarda 7s e busca novo sinal sem modificar o histórico
                             setTimeout(async () => {
                                 mestreState = { status: 'standby', step: 0, level: 0, stones: [], wasAnnounced: false };
-                                if (history.length > 0) {
-                                    const lastRoll = history[history.length - 1];
-                                    const recheck = processAlgorithms(lastRoll);
-                                    if (recheck && recheck.levelPoints >= 1) {
-                                        const deveAnunciar = recheck.levelPoints >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA;
-                                        mestreState = { status: 'active', step: 1, level: recheck.levelPoints, stones: [], wasAnnounced: deveAnunciar };
-                                        if (deveAnunciar) {
-                                            await sendTelegramMessage(`🚨 <b>NOVO SINAL DO MESTRE</b> 🚨\n\n🔥 <b>Nível de Força: ${recheck.levelPoints}</b>\n\n<i>Gerenciamento é tudo, siga o plano!</i>`);
-                                            await sendTelegramMessage(`👉 <b>Entrar no branco agora! 1/6</b>`);
-                                        }
+                                const recheck = recheckSignal();
+                                if (recheck && recheck.levelPoints >= 1) {
+                                    const deveAnunciar = recheck.levelPoints >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA;
+                                    mestreState = { status: 'active', step: 1, level: recheck.levelPoints, stones: [], wasAnnounced: deveAnunciar };
+                                    if (deveAnunciar) {
+                                        await sendTelegramMessage(`🚨 <b>NOVO SINAL DO MESTRE</b> 🚨\n\n🔥 <b>Nível de Força: ${recheck.levelPoints}</b>\n\n<i>Gerenciamento é tudo, siga o plano!</i>`);
+                                        await sendTelegramMessage(`👉 <b>Entrar no branco agora! 1/6</b>`);
                                     }
                                 }
                             }, 7000);
