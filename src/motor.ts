@@ -1,4 +1,4 @@
-import { Client } from 'pg';
+﻿import { Client } from 'pg';
 import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
 
@@ -29,7 +29,7 @@ async function sendTelegramMessage(text: string) {
 }
 
 // ============================================================================
-// ESTADO E MEM�RIA
+// ESTADO E MEMÓRIA
 // ============================================================================
 interface RollData {
     id: string;
@@ -67,12 +67,12 @@ function checkMidnightReset() {
     const today = new Date().getDate();
     if (placarDiario.lastResetDate !== today) {
         if (placarDiario.wins > 0 || placarDiario.losses > 0) {
-            sendTelegramMessage(`?? <b>Resumo do Dia - RoboBlaze</b>\n\n? Vit�rias: ${placarDiario.wins}\n? Derrotas: ${placarDiario.losses}`);
+            sendTelegramMessage(`🌙 <b>Resumo do Dia - RoboBlaze</b>\n\n✅ Vitórias: ${placarDiario.wins}\n❌ Derrotas: ${placarDiario.losses}`);
         }
         placarDiario.wins = 0;
         placarDiario.losses = 0;
         placarDiario.lastResetDate = today;
-        console.log('?? Placar di�rio resetado.');
+        console.log('🔄 Placar diário resetado.');
     }
 }
 
@@ -145,7 +145,7 @@ function processAlgorithms(newRoll: RollData) {
 }
 
 // ============================================================================
-// FIX #1: Persist�ncia do estado no banco para sobreviver a restarts
+// FIX #1: Persistência do estado no banco para sobreviver a restarts
 // ============================================================================
 async function salvarEstadoNoBanco(pgClient: Client, estadoMotor: object) {
     try {
@@ -165,7 +165,7 @@ async function restaurarEstadoDoBanco(pgClient: Client) {
             const saved = res.rows[0].state;
             if (saved.mestreState && saved.mestreState.status !== 'standby') {
                 mestreState = saved.mestreState;
-                console.log(`??  Estado restaurado: status=${mestreState.status}, step=${mestreState.step}, level=${mestreState.level}, announced=${mestreState.wasAnnounced}`);
+                console.log(`♻️  Estado restaurado: status=${mestreState.status}, step=${mestreState.step}, level=${mestreState.level}, announced=${mestreState.wasAnnounced}`);
             }
             if (saved.placarDiario) {
                 placarDiario = saved.placarDiario;
@@ -177,7 +177,7 @@ async function restaurarEstadoDoBanco(pgClient: Client) {
 }
 
 // ============================================================================
-// FIX #5: Reconex�o autom�tica ao banco
+// FIX #5: Reconexão automática ao banco
 // ============================================================================
 async function startEngine() {
     while (true) {
@@ -185,23 +185,23 @@ async function startEngine() {
             await runEngine();
         } catch (error) {
             console.error('Motor caiu, reiniciando em 5s...', error);
-            await sendTelegramMessage('?? <b>Motor reiniciando</b> � Reconectando ao banco em 5 segundos...');
+            await sendTelegramMessage('⚠️ <b>Motor reiniciando</b> — Reconectando ao banco em 5 segundos...');
         }
         await new Promise(res => setTimeout(res, 5000));
     }
 }
 
 function getFireEmojis(level: number) {
-    if (level >= 6) return '????????????';
-    if (level >= 4) return '????????';
-    return '??????';
+    if (level >= 6) return '🔥🔥🔥🔥🔥🔥';
+    if (level >= 4) return '🔥🔥🔥🔥';
+    return '🔥🔥🔥';
 }
 
 async function runEngine() {
     const client = new Client({ connectionString: process.env.DATABASE_URL });
 
     await client.connect();
-    console.log('?? Robo-Engine conectado ao PostgreSQL!');
+    console.log('🔥 Robo-Engine conectado ao PostgreSQL!');
 
     await client.query('CREATE TABLE IF NOT EXISTS engine_state (id INT PRIMARY KEY, state JSONB)');
     await client.query("INSERT INTO engine_state (id, state) VALUES (1, '{}') ON CONFLICT (id) DO NOTHING");
@@ -209,7 +209,7 @@ async function runEngine() {
     await restaurarEstadoDoBanco(client);
 
     try {
-        console.log('? Buscando �ltimas 2000 pedras...');
+        console.log('⏳ Buscando últimas 2000 pedras...');
         const res = await client.query('SELECT id, color, roll, timestamp FROM results ORDER BY timestamp DESC LIMIT 2000');
         const rows = res.rows.reverse();
         for (const row of rows) {
@@ -220,13 +220,13 @@ async function runEngine() {
                 roll: parseInt(row.roll)
             });
         }
-        console.log(`? Warmup: ${history.length} pedras em mem�ria.`);
+        console.log(`✅ Warmup: ${history.length} pedras em memória.`);
     } catch (err) {
-        console.error('?? Erro no warmup:', err);
+        console.error('⚠️ Erro no warmup:', err);
     }
 
     await client.query('LISTEN nova_pedra');
-    console.log("?? Escutando 'nova_pedra'...");
+    console.log("👂 Escutando 'nova_pedra'...");
 
     client.on('error', (err) => {
         console.error('Erro no cliente PostgreSQL:', err);
@@ -234,7 +234,7 @@ async function runEngine() {
     });
 
     client.on('end', () => {
-        throw new Error('Conex�o com PostgreSQL encerrada inesperadamente');
+        throw new Error('Conexão com PostgreSQL encerrada inesperadamente');
     });
 
     await new Promise<void>((_, reject) => {
@@ -270,7 +270,7 @@ async function runEngine() {
                         mestreState.status = 'win';
                         placarDiario.wins++;
                         if (mestreState.wasAnnounced) {
-                            messagesTelegram.push(`?? <b>GREEEN NO MESTRE!</b> ??\n\nPegamos o BRANCO na ${mestreState.step}� entrada!\nN�vel da opera��o: ${getFireEmojis(mestreState.level)}\n\n<i>Lucro garantido! Que venha o pr�ximo!</i> ??`);
+                            messagesTelegram.push(`🎯 <b>GREEEN NO MESTRE!</b> 💰\n\nPegamos o BRANCO na ${mestreState.step}ª entrada!\nNível da operação: ${getFireEmojis(mestreState.level)}\n\n<i>Lucro garantido! Que venha o próximo!</i> 🚀`);
                         }
                         setTimeout(async () => {
                             mestreState = { status: 'standby', step: 0, level: 0, stones: [], wasAnnounced: false };
@@ -278,8 +278,8 @@ async function runEngine() {
                             if (recheck && recheck.levelPoints >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA) {
                                 const deveAnunciar = true;
                                 mestreState = { status: 'active', step: 1, level: recheck.levelPoints, stones: [], wasAnnounced: deveAnunciar };
-                                await sendTelegramMessage(`?? <b>NOVO SINAL DO MESTRE</b> ??\n\n${getFireEmojis(recheck.levelPoints)} <b>N�vel de For�a: ${recheck.levelPoints} Pontos</b>\n\n<i>Gerenciamento � tudo, siga o plano!</i>`);
-                                await sendTelegramMessage(`?? <b>Entrar no branco agora! 1/6</b>`);
+                                await sendTelegramMessage(`🚨 <b>NOVO SINAL DO MESTRE</b> 🚨\n\n${getFireEmojis(recheck.levelPoints)} <b>Nível de Força: ${recheck.levelPoints} Pontos</b>\n\n<i>Gerenciamento é tudo, siga o plano!</i>`);
+                                await sendTelegramMessage(`👉 <b>Entrar no branco agora! 1/6</b>`);
                             }
                         }, 7000);
                     } else {
@@ -290,17 +290,17 @@ async function runEngine() {
                                 if (levelPoints > mestreState.level) {
                                     mestreState.level = levelPoints;
                                     mestreState.step = 1;
-                                    messagesTelegram.push(`? <b>SINAL UPGRADE! N�vel ${mestreState.level} Pontos ${getFireEmojis(mestreState.level)}</b>\nFor�a aumentou! Come�ando do zero nas entradas.`);
-                                    messagesTelegram.push(`?? <b>Entrar no branco agora! 1/6</b>`);
+                                    messagesTelegram.push(`⚡ <b>SINAL UPGRADE! Nível ${mestreState.level} Pontos ${getFireEmojis(mestreState.level)}</b>\nForça aumentou! Começando do zero nas entradas.`);
+                                    messagesTelegram.push(`👉 <b>Entrar no branco agora! 1/6</b>`);
                                 } else {
-                                    messagesTelegram.push(`?? <b>Entrar no branco agora! ${mestreState.step}/6</b>`);
+                                    messagesTelegram.push(`👉 <b>Entrar no branco agora! ${mestreState.step}/6</b>`);
                                 }
                             }
                         } else {
                             mestreState.status = 'loss';
                             placarDiario.losses++;
                             if (mestreState.wasAnnounced) {
-                                messagesTelegram.push(`? <b>RED NO MESTRE</b> ??\n\nInfelizmente o branco n�o veio nas 6 entradas de prote��o.\n\n<i>Mantenha a calma e siga o gerenciamento � risca! O mercado � feito de ciclos, o pr�ximo ser� nosso!</i> ??`);
+                                messagesTelegram.push(`❌ <b>RED NO MESTRE</b> 📉\n\nInfelizmente o branco não veio nas 6 entradas de proteção.\n\n<i>Mantenha a calma e siga o gerenciamento à risca! O mercado é feito de ciclos, o próximo será nosso!</i> 💪`);
                             }
                             setTimeout(async () => {
                                 mestreState = { status: 'standby', step: 0, level: 0, stones: [], wasAnnounced: false };
@@ -308,8 +308,8 @@ async function runEngine() {
                                 if (recheck && recheck.levelPoints >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA) {
                                     const deveAnunciar = true;
                                     mestreState = { status: 'active', step: 1, level: recheck.levelPoints, stones: [], wasAnnounced: deveAnunciar };
-                                    await sendTelegramMessage(`?? <b>NOVO SINAL DO MESTRE</b> ??\n\n${getFireEmojis(recheck.levelPoints)} <b>N�vel de For�a: ${recheck.levelPoints} Pontos</b>\n\n<i>Gerenciamento � tudo, siga o plano!</i>`);
-                                    await sendTelegramMessage(`?? <b>Entrar no branco agora! 1/6</b>`);
+                                    await sendTelegramMessage(`🚨 <b>NOVO SINAL DO MESTRE</b> 🚨\n\n${getFireEmojis(recheck.levelPoints)} <b>Nível de Força: ${recheck.levelPoints} Pontos</b>\n\n<i>Gerenciamento é tudo, siga o plano!</i>`);
+                                    await sendTelegramMessage(`👉 <b>Entrar no branco agora! 1/6</b>`);
                                 }
                             }, 7000);
                         }
@@ -329,8 +329,8 @@ async function runEngine() {
                             wasAnnounced: deveAnunciar,
                         };
 
-                        messagesTelegram.push(`?? <b>SINAL DO MESTRE DE CONFLU�NCIA</b> ??\n\n${getFireEmojis(levelPoints)} <b>N�vel de For�a: ${levelPoints} Pontos</b>\n\n<i>Gerenciamento � tudo, siga o plano!</i>`);
-                        messagesTelegram.push(`?? <b>Entrar no branco agora! 1/6</b>`);
+                        messagesTelegram.push(`🚨 <b>SINAL DO MESTRE DE CONFLUÊNCIA</b> 🚨\n\n${getFireEmojis(levelPoints)} <b>Nível de Força: ${levelPoints} Pontos</b>\n\n<i>Gerenciamento é tudo, siga o plano!</i>`);
+                        messagesTelegram.push(`👉 <b>Entrar no branco agora! 1/6</b>`);
                     }
                 }
 
