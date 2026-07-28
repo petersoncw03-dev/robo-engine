@@ -229,6 +229,7 @@ async function processNewRoll(roll: RollData) {
 
   // 1. Acompanhar e Resolver Sinais Ativos Pendentes
   const winningSignals: ActiveSignal[] = [];
+  const losingSignals: ActiveSignal[] = [];
 
   for (const sig of activeSignals) {
     if (sig.status !== 'pending') continue;
@@ -247,24 +248,30 @@ async function processNewRoll(roll: RollData) {
     if (rollTime >= sig.endTime) {
       sig.status = 'loss';
       placarDiario.losses++;
-      await sendTelegramMessage(
-        `❌ <b>LOSS</b>\n` +
-        `🎯 Minuto Alvo: ${sig.displayMinStr}\n\n` +
-        `🤖 <i>Apex Machine</i>`
-      );
-      console.log(`[LOSS] Sinal ${sig.displayMinStr} encerrou sem Branco.`);
+      losingSignals.push(sig);
     }
   }
 
   // Se 1 ou mais sinais ganharam no Branco nesta rodada, envia UMA ÚNICA mensagem consolidada de GREEN
   if (winningSignals.length > 0) {
-    const displayStr = winningSignals.map(s => s.displayMinStr).join(' / ');
+    const displayStr = Array.from(new Set(winningSignals.map(s => s.displayMinStr))).join(' / ');
     await sendTelegramMessage(
       `✅ <b>GREEN NO BRANCO! ⚪ (14X)</b>\n` +
       `🎯 Minuto Alvo: ${displayStr}\n\n` +
       `🤖 <i>Apex Machine</i>`
     );
     console.log(`[GREEN] Sinais ${displayStr} acertaram Branco no minuto :${String(rollMin).padStart(2, '0')}!`);
+  }
+
+  // Se 1 ou mais sinais sofreram LOSS nesta rodada, envia UMA ÚNICA mensagem consolidada de LOSS
+  if (losingSignals.length > 0) {
+    const displayStr = Array.from(new Set(losingSignals.map(s => s.displayMinStr))).join(' / ');
+    await sendTelegramMessage(
+      `❌ <b>LOSS</b>\n` +
+      `🎯 Minuto Alvo: ${displayStr}\n\n` +
+      `🤖 <i>Apex Machine</i>`
+    );
+    console.log(`[LOSS] Sinal ${displayStr} encerrou sem Branco.`);
   }
 
   // 2. Executar Motor da IA para Identificar Novos Sinais
