@@ -67,8 +67,14 @@ class HourlyStatTracker {
     const mPrev = (m - 1 + 60) % 60;
     const mNext = (m + 1) % 60;
 
+    // Se o minuto alvo m (com a margem mNext) ainda não foi concluído na hora atual,
+    // usamos as últimas `hoursToUse` horas que já foram concluídas (de currentHourKey - hoursToUse até currentHourKey - 1).
+    const currentHourHasRun = (this.minuteHours[m].has(currentHourKey) || this.minuteHours[mNext].has(currentHourKey));
+    const startHk = currentHourHasRun ? (currentHourKey - hoursToUse + 1) : (currentHourKey - hoursToUse);
+    const endHk = currentHourHasRun ? currentHourKey : (currentHourKey - 1);
+
     let w = 0;
-    for (let hk = currentHourKey - hoursToUse + 1; hk <= currentHourKey; hk++) {
+    for (let hk = startHk; hk <= endHk; hk++) {
       const hadW = withMargin
         ? ((this.minuteHours[mPrev].get(hk) || false) ||
            (this.minuteHours[m].get(hk) || false) ||
