@@ -81,6 +81,7 @@ const pgClient = new Client({
 const history: RollData[] = [];
 const announcedPreAlerts = new Set<string>();
 const announcedConfirmedSignals = new Set<string>();
+const announcedTargetMinutes = new Set<string>(); // Evita re-anunciar o mesmo minuto alvo várias vezes com subconjuntos
 const cancelledPreAlerts = new Set<string>();
 
 interface PendingPreAlert {
@@ -154,6 +155,8 @@ async function processNewRoll(roll: RollData) {
   const isWhite = Number(roll.roll) === 0;
 
   // 1. Acompanhar e Resolver Sinais Ativos Pendentes
+  const winningSignals: ActiveSignal[] = [];
+
   for (const sig of activeSignals) {
     if (sig.status !== 'pending') continue;
 
@@ -162,12 +165,7 @@ async function processNewRoll(roll: RollData) {
       if (isWhite) {
         sig.status = 'win';
         placarDiario.wins++;
-        await sendTelegramMessage(
-          `✅ <b>GREEN NO BRANCO! ⚪ (14X)</b>\n` +
-          `🎯 Minuto Alvo: ${sig.displayMinStr}\n\n` +
-          `🤖 <i>Apex Machine</i>`
-        );
-        console.log(`[GREEN] Sinal ${sig.displayMinStr} acertou Branco no minuto :${String(rollMin).padStart(2, '0')}!`);
+        winningSignals.push(sig);
         continue;
       }
     }
@@ -183,6 +181,17 @@ async function processNewRoll(roll: RollData) {
       );
       console.log(`[LOSS] Sinal ${sig.displayMinStr} encerrou sem Branco.`);
     }
+  }
+
+  // Se 1 ou mais sinais ganharam no Branco nesta rodada, envia UMA ÚNICA mensagem consolidada de GREEN
+  if (winningSignals.length > 0) {
+    const displayStr = winningSignals.map(s => s.displayMinStr).join(' / ');
+    await sendTelegramMessage(
+      `✅ <b>GREEN NO BRANCO! ⚪ (14X)</b>\n` +
+      `🎯 Minuto Alvo: ${displayStr}\n\n` +
+      `🤖 <i>Apex Machine</i>`
+    );
+    console.log(`[GREEN] Sinais ${displayStr} acertaram Branco no minuto :${String(rollMin).padStart(2, '0')}!`);
   }
 
   // 2. Executar Motor da IA para Identificar Novos Sinais
@@ -218,6 +227,11 @@ async function processNewRoll(roll: RollData) {
         // CONFIRMAR SINAL
         announcedConfirmedSignals.add(key);
         pendingPreAlerts.delete(key);
+
+        for (const m of pa.targetMins) {
+          const tHk = Math.floor(pa.targetTime / 3600000);
+          announcedTargetMinutes.add(`${tHk}_${m}`);
+        }
 
         const confStat = iaResult.stats.find(s => s.conf === currentMaxScore);
         const confWinrate = confStat ? confStat.winRate : (iaResult.stats.find(s => s.conf === CONFIG.MIN_CONFLUENCIA)?.winRate || 0);
@@ -277,7 +291,11 @@ async function processNewRoll(roll: RollData) {
   for (let offset = 1; offset <= CONFIG.LOOKAHEAD_MINUTES; offset++) {
     const targetTime = rollTime + offset * 60_000;
     const targetMin = new Date(targetTime).getMinutes();
+    const targetHourKey = Math.floor(targetTime / 3600000);
     const score = iaResult.scores[targetMin];
+
+    // Trava de Deduplicação: se este minuto já foi anunciado em qualquer sinal prévio deste ciclo, ignora
+    if (announcedTargetMinutes.has(`${targetHourKey}_${targetMin}`)) continue;
 
     const windowStartMin = (targetMin - 1 + 60) % 60;
     const isAlreadyInOrPastWindow = rollMin === windowStartMin || rollMin === targetMin || rollMin === (targetMin + 1) % 60;
@@ -347,6 +365,11 @@ async function processNewRoll(roll: RollData) {
     // FASE 1: Pré-Alerta de Atenção (Faltando 3 a 7 minutos)
     if (minOffset >= 3 && minOffset <= 7 && !announcedPreAlerts.has(signalKey)) {
       announcedPreAlerts.add(signalKey);
+      for (const m of mins) {
+        const tHk = Math.floor(firstTargetTime / 3600000);
+        announcedTargetMinutes.add(`${tHk}_${m}`);
+      }
+
       pendingPreAlerts.set(signalKey, {
         signalKey,
         targetMins: mins,
@@ -374,6 +397,10 @@ async function processNewRoll(roll: RollData) {
     // FASE 2: Sinal Oficial Confirmado Direto (se gerado com 2 min ou menos de antecedência)
     if (minOffset <= 2 && !announcedConfirmedSignals.has(signalKey) && !cancelledPreAlerts.has(signalKey)) {
       announcedConfirmedSignals.add(signalKey);
+      for (const m of mins) {
+        const tHk = Math.floor(firstTargetTime / 3600000);
+        announcedTargetMinutes.add(`${tHk}_${m}`);
+      }
 
       const confStat = iaResult.stats.find(s => s.conf === maxScore);
       const confWinrate = confStat ? confStat.winRate : (iaResult.stats.find(s => s.conf === CONFIG.MIN_CONFLUENCIA)?.winRate || 0);
