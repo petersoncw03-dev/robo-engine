@@ -82,6 +82,17 @@ const history: RollData[] = [];
 const announcedPreAlerts = new Set<string>();
 const announcedConfirmedSignals = new Set<string>();
 
+interface PendingPreAlert {
+  signalKey: string;
+  targetMin: number;
+  targetTime: number;
+  minPrev: number;
+  minNext: number;
+}
+
+const pendingPreAlerts = new Map<string, PendingPreAlert>();
+const cancelledPreAlerts = new Set<string>();
+
 interface ActiveSignal {
   id: string;
   targetMin: number;
@@ -197,19 +208,80 @@ async function processNewRoll(roll: RollData) {
 
   const currentHourKey = Math.floor(rollTime / 3600000);
 
-  // Analisar alvos para os próximos minutos
+  // 3. Resolver Pré-Alertas Pendentes (Confirmar ou Cancelar)
+  for (const [key, pa] of Array.from(pendingPreAlerts.entries())) {
+    if (announcedConfirmedSignals.has(key) || cancelledPreAlerts.has(key)) {
+      pendingPreAlerts.delete(key);
+      continue;
+    }
+
+    const currentScore = iaResult.scores[pa.targetMin];
+    const targetMinStr = String(pa.targetMin).padStart(2, '0');
+    const minPrevStr = String(pa.minPrev).padStart(2, '0');
+    const minNextStr = String(pa.minNext).padStart(2, '0');
+
+    // Faltando 2 minutos ou menos (ou se a janela M-1 acabou de começar)
+    const isTimeToConfirm = (pa.targetTime - rollTime) <= 2.5 * 60_000 || rollMin === pa.minPrev;
+
+    if (isTimeToConfirm) {
+      if (currentScore >= CONFIG.MIN_CONFLUENCIA && rollMin !== pa.minPrev && rollMin !== pa.targetMin) {
+        // CONFIRMAR SINAL
+        announcedConfirmedSignals.add(key);
+        pendingPreAlerts.delete(key);
+
+        const confStat = iaResult.stats.find(s => s.conf === currentScore);
+        const confWinrate = confStat ? confStat.winRate : (iaResult.stats.find(s => s.conf === CONFIG.MIN_CONFLUENCIA)?.winRate || 0);
+        const minutoWinrate = iaResult.currentHourTracker12h.getMinutePct(pa.targetMin, currentHourKey, CONFIG.MINUTO_FILTER.hours, true);
+
+        const alertText =
+          `🎯 <b>SINAL CONFIRMADO — MINUTOS DA IA</b>\n\n` +
+          `⏰ <b>Minuto Alvo:</b> :${targetMinStr} <i>(Entrar no :${minPrevStr}, :${targetMinStr} e :${minNextStr})</i>\n` +
+          `🔥 <b>Confluência:</b> ${currentScore} Estratégias\n` +
+          `📊 <b>Assertividade da confluência:</b> ${confWinrate.toFixed(1)}%\n` +
+          `🕑 <b>Assertividade do minuto:</b> ${minutoWinrate.toFixed(1)}%\n\n` +
+          `🤖 <i>Apex Machine</i>`;
+
+        await sendTelegramMessage(alertText);
+        console.log(`[SINAL CONFIRMADO ENVIADO] Minuto :${targetMinStr} | Conf: ${currentScore}`);
+
+        activeSignals.push({
+          id: key,
+          targetMin: pa.targetMin,
+          minPrev: pa.minPrev,
+          minNext: pa.minNext,
+          targetTime: pa.targetTime,
+          announcedTime: rollTime,
+          targetHourKey: currentHourKey,
+          score: currentScore,
+          status: 'pending'
+        });
+      } else {
+        // CANCELAR OPORTUNIDADE (A confluência caiu ou o tempo esgotou antes de confirmar)
+        cancelledPreAlerts.add(key);
+        pendingPreAlerts.delete(key);
+
+        const cancelText =
+          `⚠️ <b>OPORTUNIDADE CANCELADA</b>\n\n` +
+          `📉 <b>Minuto Alvo Previsto:</b> :${targetMinStr}\n` +
+          `ℹ️ <i>A confluência oscilou antes da entrada. Entrada ABORTADA por segurança!</i>\n\n` +
+          `🤖 <i>Apex Machine</i>`;
+
+        await sendTelegramMessage(cancelText);
+        console.log(`[OPORTUNIDADE CANCELADA ENVIADA] Minuto :${targetMinStr}`);
+      }
+    }
+  }
+
+  // 4. Analisar alvos para os próximos minutos
   for (let offset = 1; offset <= CONFIG.LOOKAHEAD_MINUTES; offset++) {
     const targetTime = rollTime + offset * 60_000;
     const targetMin = new Date(targetTime).getMinutes();
     const score = iaResult.scores[targetMin];
 
-    // Trava de Antecedência: Um sinal para o minuto M (janela M-1, M, M+1)
-    // SÓ PODE ser anunciado SE o relógio ainda NÃO chegou no minuto M-1!
     const windowStartMin = (targetMin - 1 + 60) % 60;
     const isAlreadyInOrPastWindow = rollMin === windowStartMin || rollMin === targetMin || rollMin === (targetMin + 1) % 60;
     if (isAlreadyInOrPastWindow) continue;
 
-    // Verifica se atinge a confluência mínima
     if (score >= CONFIG.MIN_CONFLUENCIA) {
       const signalKey = `${currentHourKey}_${targetMin}`;
       const targetMinStr = String(targetMin).padStart(2, '0');
@@ -219,6 +291,14 @@ async function processNewRoll(roll: RollData) {
       // FASE 1: Pré-Alerta de Atenção (Faltando 3 a 7 minutos)
       if (offset >= 3 && offset <= 7 && !announcedPreAlerts.has(signalKey)) {
         announcedPreAlerts.add(signalKey);
+        pendingPreAlerts.set(signalKey, {
+          signalKey,
+          targetMin,
+          targetTime,
+          minPrev: (targetMin - 1 + 60) % 60,
+          minNext: (targetMin + 1) % 60
+        });
+
         const preAlertText =
           `👀 <b>ATENÇÃO — OPORTUNIDADE EM DETECÇÃO</b>\n\n` +
           `⚡ <b>A IA identificou um padrão se formando para os próximos minutos!</b>\n` +
@@ -231,18 +311,14 @@ async function processNewRoll(roll: RollData) {
         console.log(`[PRÉ-ALERTA ENVIADO] Minuto :${targetMinStr} | Offset: ${offset}m`);
       }
 
-      // FASE 2: Sinal Oficial Confirmado (Faltando 2 minutos ou menos)
-      if (offset <= 2 && !announcedConfirmedSignals.has(signalKey)) {
+      // FASE 2: Sinal Oficial Confirmado Direto (se gerado com 2 min ou menos de antecedência)
+      if (offset <= 2 && !announcedConfirmedSignals.has(signalKey) && !cancelledPreAlerts.has(signalKey)) {
         announcedConfirmedSignals.add(signalKey);
 
-        // Taxa do Placar de Confluência (3h) para o score atual
         const confStat = iaResult.stats.find(s => s.conf === score);
         const confWinrate = confStat ? confStat.winRate : (iaResult.stats.find(s => s.conf === CONFIG.MIN_CONFLUENCIA)?.winRate || 0);
-
-        // Taxa Histórica do Minuto (:MM) nas últimas 3h com margem ±1min
         const minutoWinrate = iaResult.currentHourTracker12h.getMinutePct(targetMin, currentHourKey, CONFIG.MINUTO_FILTER.hours, true);
 
-        // FORMATO DO SINAL CONFIRMADO COM ASSINATURA APEX MACHINE
         const alertText = 
           `🎯 <b>SINAL CONFIRMADO — MINUTOS DA IA</b>\n\n` +
           `⏰ <b>Minuto Alvo:</b> :${targetMinStr} <i>(Entrar no :${minPrevStr}, :${targetMinStr} e :${minNextStr})</i>\n` +
