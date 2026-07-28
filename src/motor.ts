@@ -126,31 +126,39 @@ async function processNewRoll(roll: RollData) {
   const rollMin = new Date(roll.timestamp).getMinutes();
   const isWhite = Number(roll.roll) === 0;
 
+  // Helper: verifica se o minuto atual já passou da janela do sinal ({M-1, M, M+1})
+  const isMinutePastWindow = (rMin: number, tMin: number, nMin: number, rTime: number, tTime: number): boolean => {
+    if (rTime > tTime + 2.5 * 60_000) return true; // Segurança por tempo absoluto
+    if (nMin === 0) return rMin > 0 && rMin < (tMin - 1 + 60) % 60;
+    if (nMin === 1) return rMin > 1 && rMin < (tMin - 1 + 60) % 60;
+    return rMin > nMin;
+  };
+
   // 1. Acompanhar e Resolver Sinais Ativos Pendentes
   for (const sig of activeSignals) {
     if (sig.status !== 'pending') continue;
 
-    const windowStart = sig.targetTime - 1.5 * 60_000;
-    const windowEnd = sig.targetTime + 1.5 * 60_000;
+    const allowedMinutes = [sig.minPrev, sig.targetMin, sig.minNext];
 
-    // Se estamos dentro da janela do sinal ({M-1, M, M+1})
-    if (rollTime >= windowStart && rollTime <= windowEnd) {
+    // Se o roll caiu exatamente nos minutos autorizados (:17, :18, :19)
+    if (allowedMinutes.includes(rollMin)) {
       if (isWhite) {
         sig.status = 'win';
         placarDiario.wins++;
         const targetMinStr = String(sig.targetMin).padStart(2, '0');
+        const rollMinStr = String(rollMin).padStart(2, '0');
         await sendTelegramMessage(
           `✅ <b>GREEN NO BRANCO! ⚪ (14X)</b>\n` +
           `🎯 Minuto Alvo: :${targetMinStr}\n\n` +
           `🤖 <i>Apex Machine</i>`
         );
-        console.log(`[GREEN] Sinal no minuto :${targetMinStr} acertou Branco!`);
+        console.log(`[GREEN] Sinal no minuto :${targetMinStr} acertou Branco no minuto :${rollMinStr}!`);
         continue;
       }
     }
 
-    // Se a janela PASSOU COMPLETAMENTE (> M+1) e não deu win -> LOSS!
-    if (rollTime > windowEnd) {
+    // Se o relógio já passou por completo do minuto final (ex: virou :20) -> LOSS!
+    if (isMinutePastWindow(rollMin, sig.targetMin, sig.minNext, rollTime, sig.targetTime)) {
       sig.status = 'loss';
       placarDiario.losses++;
       const targetMinStr = String(sig.targetMin).padStart(2, '0');
