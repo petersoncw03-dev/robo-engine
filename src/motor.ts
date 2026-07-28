@@ -1,9 +1,27 @@
+import http from 'http';
 import { Client } from 'pg';
 import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
 import { calculateIA, RollData } from './engines/iaEngine';
 
 dotenv.config();
+
+// Servidor de Health Check para o EasyPanel (Impede o SIGTERM)
+const PORT = Number(process.env.PORT || 3000);
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('RoboBlaze Engine Running OK\n');
+}).listen(PORT, () => {
+  console.log(`🌐 [ROBO ENGINE] Servidor de Health Check rodando na porta ${PORT}`);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('❌ [ROBO ENGINE] Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('❌ [ROBO ENGINE] Unhandled Rejection:', reason);
+});
 
 // ============================================================================
 // CONFIGURAÇÕES DO TELEGRAM E FILTROS DO ROBÔ
