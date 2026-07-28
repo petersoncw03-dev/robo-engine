@@ -231,14 +231,14 @@ async function processNewRoll(roll: RollData) {
 
         const confStat = iaResult.stats.find(s => s.conf === currentScore);
         const confWinrate = confStat ? confStat.winRate : (iaResult.stats.find(s => s.conf === CONFIG.MIN_CONFLUENCIA)?.winRate || 0);
-        const minutoWinrate = iaResult.currentHourTracker12h.getMinutePct(pa.targetMin, currentHourKey, CONFIG.MINUTO_FILTER.hours, true);
+        const minutoWinrate6h = iaResult.currentHourTracker12h.getMinutePct(pa.targetMin, currentHourKey, 6, true);
 
         const alertText =
           `🎯 <b>SINAL CONFIRMADO — MINUTOS DA IA</b>\n\n` +
           `⏰ <b>Minuto Alvo:</b> :${targetMinStr} <i>(Entrar no :${minPrevStr}, :${targetMinStr} e :${minNextStr})</i>\n` +
           `🔥 <b>Confluência:</b> ${currentScore} Estratégias\n` +
           `📊 <b>Assertividade da confluência:</b> ${confWinrate.toFixed(1)}%\n` +
-          `🕑 <b>Assertividade do minuto:</b> ${minutoWinrate.toFixed(1)}%\n\n` +
+          `🕑 <b>Assertividade do minuto em 6h:</b> ${minutoWinrate6h.toFixed(1)}%\n\n` +
           `🤖 <i>Apex Machine</i>`;
 
         await sendTelegramMessage(alertText);
@@ -317,18 +317,18 @@ async function processNewRoll(roll: RollData) {
 
         const confStat = iaResult.stats.find(s => s.conf === score);
         const confWinrate = confStat ? confStat.winRate : (iaResult.stats.find(s => s.conf === CONFIG.MIN_CONFLUENCIA)?.winRate || 0);
-        const minutoWinrate = iaResult.currentHourTracker12h.getMinutePct(targetMin, currentHourKey, CONFIG.MINUTO_FILTER.hours, true);
+        const minutoWinrate6h = iaResult.currentHourTracker12h.getMinutePct(targetMin, currentHourKey, 6, true);
 
         const alertText = 
           `🎯 <b>SINAL CONFIRMADO — MINUTOS DA IA</b>\n\n` +
           `⏰ <b>Minuto Alvo:</b> :${targetMinStr} <i>(Entrar no :${minPrevStr}, :${targetMinStr} e :${minNextStr})</i>\n` +
           `🔥 <b>Confluência:</b> ${score} Estratégias\n` +
           `📊 <b>Assertividade da confluência:</b> ${confWinrate.toFixed(1)}%\n` +
-          `🕑 <b>Assertividade do minuto:</b> ${minutoWinrate.toFixed(1)}%\n\n` +
+          `🕑 <b>Assertividade do minuto em 6h:</b> ${minutoWinrate6h.toFixed(1)}%\n\n` +
           `🤖 <i>Apex Machine</i>`;
 
         await sendTelegramMessage(alertText);
-        console.log(`[SINAL CONFIRMADO ENVIADO] Minuto :${targetMinStr} | Conf: ${score} | MinWr: ${minutoWinrate.toFixed(1)}%`);
+        console.log(`[SINAL CONFIRMADO ENVIADO] Minuto :${targetMinStr} | Conf: ${score} | MinWr: ${minutoWinrate6h.toFixed(1)}%`);
 
         activeSignals.push({
           id: signalKey,
