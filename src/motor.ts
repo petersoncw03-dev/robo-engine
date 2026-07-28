@@ -1,361 +1,294 @@
-﻿import { Client } from 'pg';
+import { Client } from 'pg';
 import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
+import { calculateIA, RollData } from './engines/iaEngine';
 
 dotenv.config();
 
 // ============================================================================
-// TELEGRAM
+// CONFIGURAÇÕES DO TELEGRAM E FILTROS DO ROBÔ
 // ============================================================================
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || '';
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
 
 const bot = TELEGRAM_TOKEN ? new TelegramBot(TELEGRAM_TOKEN, { polling: false }) : null;
 
-const REGRAS_TELEGRAM = {
-    MESTRE_FORCA_MINIMA: 3,
+// Configuração Operacional dos Filtros da IA (Conforme Especificação)
+const CONFIG = {
+  MIN_CONFLUENCIA: Number(process.env.MIN_CONFLUENCIA || 3), // Confluência Mínima (ex: 3+)
+  MICRO_FILTER: { enabled: true, minWr: 20, maxWr: 100, hours: 1 }, // 1h, 20% a 100%
+  MACRO_FILTER: { enabled: true, minWr: 30, maxWr: 100, hours: 72 }, // 72h, 30% a 100%
+  MINUTO_FILTER: { enabled: true, minWr: 40, maxWr: 100, hours: 3 }, // 3h, 40% a 100%
+  DISABLED_STRATS: new Set<number>([4, 5, 6, 8, 9, 10, 11, 12]), // 7 Elite ativas por padrão
+  PERIOD_HOURS: 3, // Período do Backtest para o Placar de Confluência
+  LOOKAHEAD_MINUTES: 10, // Analisar alvos para os próximos 10 minutos
 };
 
 async function sendTelegramMessage(text: string) {
-    if (bot && TELEGRAM_CHAT_ID) {
-        try {
-            await bot.sendMessage(TELEGRAM_CHAT_ID, text, { parse_mode: 'HTML' });
-        } catch (error) {
-            console.error('Erro ao enviar mensagem para o Telegram:', error);
-        }
-    } else {
-        console.log('[TELEGRAM MOCK]', text.replace(/<[^>]*>?/gm, ''));
+  if (bot && TELEGRAM_CHAT_ID) {
+    try {
+      await bot.sendMessage(TELEGRAM_CHAT_ID, text, { parse_mode: 'HTML' });
+    } catch (error) {
+      console.error('Erro ao enviar mensagem para o Telegram:', error);
     }
+  } else {
+    console.log('\n[TELEGRAM MOCK]\n' + text.replace(/<[^>]*>?/gm, '') + '\n');
+  }
 }
 
 // ============================================================================
-// ESTADO E MEMÓRIA
+// BANCO DE DADOS POSTGRESQL
 // ============================================================================
-interface RollData {
-    id: string;
-    timestamp: string;
-    color: string;
-    roll: number;
-}
+const DATABASE_URL = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/blaze';
 
-interface MestreState {
-    status: 'standby' | 'active' | 'win' | 'loss';
-    step: number;
-    level: number;
-    stones: number[];
-    wasAnnounced: boolean;
-}
+const pgClient = new Client({
+  connectionString: DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
 
-const MAX_HISTORY = 2000;
+// ============================================================================
+// MEMÓRIA E ESTADO DO ROBÔ
+// ============================================================================
 const history: RollData[] = [];
+const announcedSignals = new Set<string>(); // Evita duplicar alerta do mesmo minuto/hora
 
-let mestreState: MestreState = {
-    status: 'standby',
-    step: 0,
-    level: 0,
-    stones: [],
-    wasAnnounced: false,
-};
+interface ActiveSignal {
+  id: string;
+  targetMin: number;
+  minPrev: number;
+  minNext: number;
+  announcedTime: number;
+  targetHourKey: number;
+  score: number;
+  status: 'pending' | 'win' | 'loss';
+}
+
+const activeSignals: ActiveSignal[] = [];
 
 let placarDiario = {
-    wins: 0,
-    losses: 0,
-    lastResetDate: new Date().getDate()
+  wins: 0,
+  losses: 0,
+  lastResetDate: new Date().getDate()
 };
 
 function checkMidnightReset() {
-    const today = new Date().getDate();
-    if (placarDiario.lastResetDate !== today) {
-        if (placarDiario.wins > 0 || placarDiario.losses > 0) {
-            sendTelegramMessage(`🌙 <b>Resumo do Dia - RoboBlaze</b>\n\n✅ Vitórias: ${placarDiario.wins}\n❌ Derrotas: ${placarDiario.losses}`);
-        }
-        placarDiario.wins = 0;
-        placarDiario.losses = 0;
-        placarDiario.lastResetDate = today;
-        console.log('🔄 Placar diário resetado.');
+  const today = new Date().getDate();
+  if (placarDiario.lastResetDate !== today) {
+    if (placarDiario.wins > 0 || placarDiario.losses > 0) {
+      const total = placarDiario.wins + placarDiario.losses;
+      const wr = total > 0 ? ((placarDiario.wins / total) * 100).toFixed(1) : '0.0';
+      sendTelegramMessage(
+        `🌙 <b>Resumo do Dia — Minutos da IA</b>\n\n` +
+        `✅ <b>Vitórias (Brancos):</b> ${placarDiario.wins}\n` +
+        `❌ <b>Derrotas:</b> ${placarDiario.losses}\n` +
+        `📈 <b>Assertividade:</b> ${wr}%`
+      );
     }
+    placarDiario.wins = 0;
+    placarDiario.losses = 0;
+    placarDiario.lastResetDate = today;
+    console.log('🔄 Placar diário do Telegram resetado.');
+  }
 }
 
 // ============================================================================
-// ENGINES
+// PROCESSAMENTO PRINCIPAL DE RODADAS EM TEMPO REAL
 // ============================================================================
-import { calculateRadar } from './engines/radarEngine';
-import { calculateIA } from './engines/iaEngine';
+async function processNewRoll(roll: RollData) {
+  history.push(roll);
+  if (history.length > 3000) history.shift(); // Mantém memória leve
 
-function getPoints(radarData: any, iaData1h: any, iaData3h: any) {
-    const currentConfluences = iaData3h.currentIaScore;
-    let iaPoints = 0;
-    
-    if (currentConfluences >= 1) {
-        const stat1h = iaData1h.stats.find((s: any) => s.conf === currentConfluences);
-        const stat3h = iaData3h.stats.find((s: any) => s.conf === currentConfluences);
-        const wr1 = stat1h ? stat1h.winRate : 0;
-        const wr3 = stat3h ? stat3h.winRate : 0;
-        const maxWinrate = Math.max(wr1, wr3);
-        
-        if (maxWinrate > 60) iaPoints = 4;
-        else if (maxWinrate > 45) iaPoints = 3;
-        else if (maxWinrate > 38) iaPoints = 2;
-        else if (maxWinrate > 33) iaPoints = 1;
-    }
-    
-    const totalPoints = radarData.radarPoints + iaPoints;
-    const isSinalMaster = (currentConfluences >= 3 && iaPoints >= 1);
-    
-    let finalApproved = false;
-    if (isSinalMaster || totalPoints >= 3) {
-        finalApproved = true;
-    }
+  checkMidnightReset();
 
-    return { totalPoints, finalApproved, isSinalMaster };
-}
+  const rollTime = new Date(roll.timestamp).getTime();
+  const rollMin = new Date(roll.timestamp).getMinutes();
+  const isWhite = Number(roll.roll) === 0;
 
-function recheckSignal() {
-    if (history.length < 50) return null;
-    const radarData = calculateRadar(history);
-    const iaData3h = calculateIA(history, 3);
-    const iaData1h = calculateIA(history, 1);
-    
-    const { totalPoints, finalApproved } = getPoints(radarData, iaData1h, iaData3h);
+  // 1. Acompanhar e Resolver Sinais Ativos Pendentes
+  for (const sig of activeSignals) {
+    if (sig.status !== 'pending') continue;
 
-    return { levelPoints: finalApproved ? totalPoints : 0, engineState: { radarData, iaData: iaData3h } };
-}
+    // Verificar se o roll atual pertence à janela {M-1, M, M+1} do sinal
+    const diffMin = Math.abs(rollMin - sig.targetMin);
+    const inWindow = diffMin <= 1 || diffMin >= 59; // Wraparound minuto 0/59
 
-function processAlgorithms(newRoll: RollData) {
-    history.push(newRoll);
-    if (history.length > MAX_HISTORY) {
-        history.shift();
+    if (inWindow && isWhite) {
+      sig.status = 'win';
+      placarDiario.wins++;
+      const targetMinStr = String(sig.targetMin).padStart(2, '0');
+      await sendTelegramMessage(
+        `✅ <b>GREEN NO BRANCO! ⚪ (14X)</b>\n` +
+        `🎯 Minuto Alvo: :${targetMinStr}`
+      );
+      console.log(`[GREEN] Sinal no minuto :${targetMinStr} acertou Branco!`);
+      continue;
     }
 
-    if (history.length < 50) return null;
-
-    const isBranco = newRoll.color.toLowerCase().includes('branco') || newRoll.roll === 0;
-
-    const radarData = calculateRadar(history);
-    const iaData3h = calculateIA(history, 3);
-    const iaData1h = calculateIA(history, 1);
-
-    const { totalPoints, finalApproved } = getPoints(radarData, iaData1h, iaData3h);
-
-    return {
-        levelPoints: finalApproved ? totalPoints : 0,
-        isBranco,
-        engineState: { radarData, iaData: iaData3h }
-    };
-}
-
-// ============================================================================
-// FIX #1: Persistência do estado no banco para sobreviver a restarts
-// ============================================================================
-async function salvarEstadoNoBanco(pgClient: Client, estadoMotor: object) {
-    try {
-        await pgClient.query(
-            'UPDATE engine_state SET state = $1 WHERE id = 1',
-            [JSON.stringify(estadoMotor)]
+    // Se passou do tempo máximo da janela (+2min do minuto alvo), expira como LOSS
+    if (rollTime > (sig.announcedTime + 4 * 60_000) && !inWindow) {
+      if (sig.status === 'pending') {
+        sig.status = 'loss';
+        placarDiario.losses++;
+        const targetMinStr = String(sig.targetMin).padStart(2, '0');
+        await sendTelegramMessage(
+          `❌ <b>LOSS</b>\n` +
+          `🎯 Minuto Alvo: :${targetMinStr}`
         );
-    } catch (err) {
-        console.error('Erro ao salvar estado no banco:', err);
+        console.log(`[LOSS] Sinal no minuto :${targetMinStr} encerrou sem Branco.`);
+      }
     }
-}
+  }
 
-async function restaurarEstadoDoBanco(pgClient: Client) {
-    try {
-        const res = await pgClient.query('SELECT state FROM engine_state WHERE id = 1');
-        if (res.rows.length > 0 && res.rows[0].state) {
-            const saved = res.rows[0].state;
-            if (saved.mestreState && saved.mestreState.status !== 'standby') {
-                mestreState = saved.mestreState;
-                console.log(`♻️  Estado restaurado: status=${mestreState.status}, step=${mestreState.step}, level=${mestreState.level}, announced=${mestreState.wasAnnounced}`);
-            }
-            if (saved.placarDiario) {
-                placarDiario = saved.placarDiario;
-            }
-        }
-    } catch (err) {
-        console.error('Erro ao restaurar estado do banco:', err);
+  // 2. Executar Motor da IA para Identificar Novos Sinais
+  if (history.length < 50) return;
+
+  const iaResult = calculateIA(
+    history,
+    CONFIG.PERIOD_HOURS,
+    CONFIG.DISABLED_STRATS,
+    true, // withMargin
+    false, // smartFilter
+    CONFIG.MICRO_FILTER,
+    CONFIG.MACRO_FILTER,
+    CONFIG.MINUTO_FILTER
+  );
+
+  const currentHourKey = Math.floor(rollTime / 3600000);
+
+  // Analisar alvos para os próximos minutos
+  for (let offset = 1; offset <= CONFIG.LOOKAHEAD_MINUTES; offset++) {
+    const targetTime = rollTime + offset * 60_000;
+    const targetMin = new Date(targetTime).getMinutes();
+    const score = iaResult.scores[targetMin];
+
+    // Verifica se atinge a confluência mínima (ex: 3+)
+    if (score >= CONFIG.MIN_CONFLUENCIA) {
+      const signalKey = `${currentHourKey}_${targetMin}`;
+
+      if (!announcedSignals.has(signalKey)) {
+        announcedSignals.add(signalKey);
+
+        const targetMinStr = String(targetMin).padStart(2, '0');
+        const minPrevStr = String((targetMin - 1 + 60) % 60).padStart(2, '0');
+        const minNextStr = String((targetMin + 1) % 60).padStart(2, '0');
+
+        // Taxa do Placar de Confluência (3h) para o score atual
+        const confStat = iaResult.stats.find(s => s.conf === score);
+        const confWinrate = confStat ? confStat.winRate : (iaResult.stats.find(s => s.conf === CONFIG.MIN_CONFLUENCIA)?.winRate || 0);
+
+        // Taxa Histórica do Minuto (:MM) nas últimas 3h com margem ±1min
+        const minutoWinrate = iaResult.currentHourTracker12h.getMinutePct(targetMin, currentHourKey, CONFIG.MINUTO_FILTER.hours, true);
+
+        // FORMATO DO ALERTA TELEGRAM EXATAMENTE COMO SOLICITADO
+        const alertText = 
+          `🎯 <b>SINAL CONFIRMADO — MINUTOS DA IA</b>\n\n` +
+          `⏰ <b>Minuto Alvo:</b> :${targetMinStr} <i>(Entrar no :${minPrevStr}, :${targetMinStr} e :${minNextStr})</i>\n` +
+          `🔥 <b>Confluência:</b> ${score} Estratégias\n` +
+          `📊 <b>Assertividade da confluência:</b> ${confWinrate.toFixed(1)}%\n` +
+          `🕑 <b>Assertividade do minuto:</b> ${minutoWinrate.toFixed(1)}%`;
+
+        await sendTelegramMessage(alertText);
+        console.log(`[ALERTA ENVIADO] Minuto :${targetMinStr} | Conf: ${score} | MinWr: ${minutoWinrate.toFixed(1)}%`);
+
+        activeSignals.push({
+          id: signalKey,
+          targetMin,
+          minPrev: (targetMin - 1 + 60) % 60,
+          minNext: (targetMin + 1) % 60,
+          announcedTime: rollTime,
+          targetHourKey: currentHourKey,
+          score,
+          status: 'pending'
+        });
+      }
     }
+  }
 }
 
 // ============================================================================
-// FIX #5: Reconexão automática ao banco
+// CARGA INICIAL DO BANCO DE DADOS & LOOP DE LISTENING
 // ============================================================================
 async function startEngine() {
-    while (true) {
-        try {
-            await runEngine();
-        } catch (error) {
-            console.error('Motor caiu, reiniciando em 5s...', error);
-            await sendTelegramMessage('⚠️ <b>Motor reiniciando</b> — Reconectando ao banco em 5 segundos...');
-        }
-        await new Promise(res => setTimeout(res, 5000));
-    }
-}
+  console.log('🚀 Iniciando RoboBlaze Engine — Minutos da IA...');
+  
+  try {
+    await pgClient.connect();
+    console.log('✅ Conectado ao PostgreSQL com sucesso.');
 
-function getFireEmojis(level: number) {
-    if (level >= 6) return '🔥🔥🔥🔥🔥🔥';
-    if (level >= 4) return '🔥🔥🔥🔥';
-    return '🔥🔥🔥';
-}
+    // Carga Inicial: Puxa 240 horas (10 dias) para alimentar o filtro Macro de 72h com Warmup completo
+    console.log('📥 Carregando histórico inicial do PostgreSQL (240h / 10 dias)...');
+    const res = await pgClient.query(`
+      SELECT id, roll, color, created_at as timestamp 
+      FROM results 
+      WHERE created_at >= NOW() - INTERVAL '240 hours'
+      ORDER BY created_at ASC
+    `);
 
-async function runEngine() {
-    const client = new Client({ connectionString: process.env.DATABASE_URL });
-
-    await client.connect();
-    console.log('🔥 Robo-Engine conectado ao PostgreSQL!');
-
-    await client.query('CREATE TABLE IF NOT EXISTS engine_state (id INT PRIMARY KEY, state JSONB)');
-    await client.query("INSERT INTO engine_state (id, state) VALUES (1, '{}') ON CONFLICT (id) DO NOTHING");
-
-    await restaurarEstadoDoBanco(client);
-
-    try {
-        console.log('⏳ Buscando últimas 2000 pedras...');
-        const res = await client.query('SELECT id, color, roll, timestamp FROM results ORDER BY timestamp DESC LIMIT 2000');
-        const rows = res.rows.reverse();
-        for (const row of rows) {
-            history.push({
-                id: row.id,
-                timestamp: row.timestamp instanceof Date ? row.timestamp.toISOString() : row.timestamp,
-                color: row.color,
-                roll: parseInt(row.roll)
-            });
-        }
-        console.log(`✅ Warmup: ${history.length} pedras em memória.`);
-    } catch (err) {
-        console.error('⚠️ Erro no warmup:', err);
-    }
-
-    await client.query('LISTEN nova_pedra');
-    console.log("👂 Escutando 'nova_pedra'...");
-
-    client.on('error', (err) => {
-        console.error('Erro no cliente PostgreSQL:', err);
-        throw err;
-    });
-
-    client.on('end', () => {
-        throw new Error('Conexão com PostgreSQL encerrada inesperadamente');
-    });
-
-    await new Promise<void>((_, reject) => {
-        client.on('notification', async (msg) => {
-            if (msg.channel !== 'nova_pedra' || !msg.payload) return;
-
-            try {
-                checkMidnightReset();
-
-                const payload = JSON.parse(msg.payload);
-                const newRoll: RollData = {
-                    id: payload.id || `temp-${Date.now()}`,
-                    timestamp: payload.created_at || new Date().toISOString(),
-                    color: payload.color || 'Preto',
-                    roll: parseInt(payload.roll)
-                };
-
-                if (history.length > 0 && history[history.length - 1].id === newRoll.id) {
-                    return;
-                }
-
-                const calcResult = processAlgorithms(newRoll);
-                if (!calcResult) return;
-
-                const { levelPoints, isBranco } = calcResult;
-
-                const messagesTelegram: string[] = [];
-
-                if (mestreState.status === 'active') {
-                    mestreState.stones.push(newRoll.roll);
-
-                    if (isBranco) {
-                        mestreState.status = 'win';
-                        placarDiario.wins++;
-                        if (mestreState.wasAnnounced) {
-                            messagesTelegram.push(`🎯 <b>GREEEN NO MESTRE!</b> 💰\n\nPegamos o BRANCO na ${mestreState.step}ª entrada!\nNível da operação: ${getFireEmojis(mestreState.level)}\n\n<i>Lucro garantido! Que venha o próximo!</i> 🚀`);
-                        }
-                        setTimeout(async () => {
-                            mestreState = { status: 'standby', step: 0, level: 0, stones: [], wasAnnounced: false };
-                            const recheck = recheckSignal();
-                            if (recheck && recheck.levelPoints >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA) {
-                                const deveAnunciar = true;
-                                mestreState = { status: 'active', step: 1, level: recheck.levelPoints, stones: [], wasAnnounced: deveAnunciar };
-                                await sendTelegramMessage(`🚨 <b>NOVO SINAL DO MESTRE</b> 🚨\n\n${getFireEmojis(recheck.levelPoints)} <b>Nível de Força: ${recheck.levelPoints} Pontos</b>\n\n<i>Gerenciamento é tudo, siga o plano!</i>`);
-                                await sendTelegramMessage(`👉 <b>Entrar no branco agora! 1/6</b>`);
-                            }
-                        }, 7000);
-                    } else {
-                        if (mestreState.step < 6) {
-                            mestreState.step++;
-
-                            if (mestreState.wasAnnounced) {
-                                if (levelPoints > mestreState.level) {
-                                    mestreState.level = levelPoints;
-                                    mestreState.step = 1;
-                                    messagesTelegram.push(`⚡ <b>SINAL UPGRADE! Nível ${mestreState.level} Pontos ${getFireEmojis(mestreState.level)}</b>\nForça aumentou! Começando do zero nas entradas.`);
-                                    messagesTelegram.push(`👉 <b>Entrar no branco agora! 1/6</b>`);
-                                } else {
-                                    messagesTelegram.push(`👉 <b>Entrar no branco agora! ${mestreState.step}/6</b>`);
-                                }
-                            }
-                        } else {
-                            mestreState.status = 'loss';
-                            placarDiario.losses++;
-                            if (mestreState.wasAnnounced) {
-                                messagesTelegram.push(`❌ <b>RED NO MESTRE</b> 📉\n\nInfelizmente o branco não veio nas 6 entradas de proteção.\n\n<i>Mantenha a calma e siga o gerenciamento à risca! O mercado é feito de ciclos, o próximo será nosso!</i> 💪`);
-                            }
-                            setTimeout(async () => {
-                                mestreState = { status: 'standby', step: 0, level: 0, stones: [], wasAnnounced: false };
-                                const recheck = recheckSignal();
-                                if (recheck && recheck.levelPoints >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA) {
-                                    const deveAnunciar = true;
-                                    mestreState = { status: 'active', step: 1, level: recheck.levelPoints, stones: [], wasAnnounced: deveAnunciar };
-                                    await sendTelegramMessage(`🚨 <b>NOVO SINAL DO MESTRE</b> 🚨\n\n${getFireEmojis(recheck.levelPoints)} <b>Nível de Força: ${recheck.levelPoints} Pontos</b>\n\n<i>Gerenciamento é tudo, siga o plano!</i>`);
-                                    await sendTelegramMessage(`👉 <b>Entrar no branco agora! 1/6</b>`);
-                                }
-                            }, 7000);
-                        }
-                    }
-                } else {
-                    if (mestreState.status === 'win' || mestreState.status === 'loss') {
-                        mestreState = { status: 'standby', step: 0, level: 0, stones: [], wasAnnounced: false };
-                    }
-
-                    if (levelPoints >= REGRAS_TELEGRAM.MESTRE_FORCA_MINIMA) {
-                        const deveAnunciar = true;
-                        mestreState = {
-                            status: 'active',
-                            step: 1,
-                            level: levelPoints,
-                            stones: [],
-                            wasAnnounced: deveAnunciar,
-                        };
-
-                        messagesTelegram.push(`🚨 <b>SINAL DO MESTRE DE CONFLUÊNCIA</b> 🚨\n\n${getFireEmojis(levelPoints)} <b>Nível de Força: ${levelPoints} Pontos</b>\n\n<i>Gerenciamento é tudo, siga o plano!</i>`);
-                        messagesTelegram.push(`👉 <b>Entrar no branco agora! 1/6</b>`);
-                    }
-                }
-
-                for (const m of messagesTelegram) {
-                    await sendTelegramMessage(m);
-                }
-
-                const estadoMotor = {
-                    mestreState,
-                    placarDiario,
-                    timestamp: new Date().toISOString(),
-                    radarData: calcResult.engineState.radarData,
-                    iaData: calcResult.engineState.iaData
-                };
-
-                await salvarEstadoNoBanco(client, estadoMotor);
-
-                await client.query('NOTIFY estado_motor');
-
-            } catch (err) {
-                console.error('Erro ao processar pedra:', err);
-                reject(err);
-            }
+    if (res.rows && res.rows.length > 0) {
+      for (const row of res.rows) {
+        history.push({
+          id: String(row.id),
+          roll: Number(row.roll),
+          color: String(row.color || ''),
+          timestamp: row.timestamp
         });
+      }
+      console.log(`✅ ${history.length} rodadas carregadas no histórico inicial.`);
+    }
+
+    // Escutar rodadas em tempo real via LISTEN / NOTIFY ou Polling de segurança
+    await pgClient.query('LISTEN new_roll');
+    pgClient.on('notification', async (msg) => {
+      if (msg.payload) {
+        try {
+          const newRoll = JSON.parse(msg.payload);
+          await processNewRoll({
+            id: String(newRoll.id || Date.now()),
+            roll: Number(newRoll.roll),
+            color: String(newRoll.color || ''),
+            timestamp: newRoll.created_at || newRoll.timestamp || new Date().toISOString()
+          });
+        } catch (e) {
+          console.error('Erro ao processar notificação de rodada:', e);
+        }
+      }
     });
+
+    // Polling de segurança a cada 3 segundos (garante recebimento se LISTEN falhar)
+    let lastProcessedId = history.length > 0 ? history[history.length - 1].id : '';
+
+    setInterval(async () => {
+      try {
+        const pollRes = await pgClient.query(`
+          SELECT id, roll, color, created_at as timestamp 
+          FROM results 
+          ORDER BY created_at DESC 
+          LIMIT 1
+        `);
+
+        if (pollRes.rows && pollRes.rows.length > 0) {
+          const latest = pollRes.rows[0];
+          const latestId = String(latest.id);
+          if (latestId !== lastProcessedId) {
+            lastProcessedId = latestId;
+            await processNewRoll({
+              id: latestId,
+              roll: Number(latest.roll),
+              color: String(latest.color || ''),
+              timestamp: latest.timestamp
+            });
+          }
+        }
+      } catch (err) {
+        console.error('Erro no Polling de rodadas:', err);
+      }
+    }, 3000);
+
+    console.log('🟢 RoboBlaze Engine rodando e aguardando rodadas...');
+
+  } catch (error) {
+    console.error('❌ Erro na inicialização do RoboBlaze Engine:', error);
+  }
 }
 
 startEngine();
