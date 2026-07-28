@@ -193,6 +193,12 @@ async function processNewRoll(roll: RollData) {
     const targetMin = new Date(targetTime).getMinutes();
     const score = iaResult.scores[targetMin];
 
+    // Trava de Antecedência: Um sinal para o minuto M (janela M-1, M, M+1)
+    // SÓ PODE ser anunciado SE o relógio ainda NÃO chegou no minuto M-1!
+    const windowStartMin = (targetMin - 1 + 60) % 60;
+    const isAlreadyInOrPastWindow = rollMin === windowStartMin || rollMin === targetMin || rollMin === (targetMin + 1) % 60;
+    if (isAlreadyInOrPastWindow) continue;
+
     // Verifica se atinge a confluência mínima
     if (score >= CONFIG.MIN_CONFLUENCIA) {
       const signalKey = `${currentHourKey}_${targetMin}`;
