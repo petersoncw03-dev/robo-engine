@@ -221,10 +221,10 @@ async function startEngine() {
     let res;
     try {
       res = await pgClient.query(`
-        SELECT id, roll, color, created_at as timestamp 
+        SELECT id, roll, color, timestamp 
         FROM results 
-        WHERE created_at >= NOW() - INTERVAL '240 hours'
-        ORDER BY created_at ASC
+        WHERE timestamp >= NOW() - INTERVAL '240 hours'
+        ORDER BY timestamp ASC
       `);
     } catch (e) {
       res = await pgClient.query(`
@@ -255,12 +255,12 @@ async function startEngine() {
       if (msg.payload) {
         try {
           const newRoll = JSON.parse(msg.payload);
-          console.log(`📢 [ROBO ENGINE] Nova pedra via NOTIFY (${msg.channel}):`, newRoll.roll || newRoll);
+          console.log(`📢 [ROBO ENGINE] Nova pedra via NOTIFY (${msg.channel}):`, newRoll.roll !== undefined ? newRoll.roll : newRoll);
           await processNewRoll({
             id: String(newRoll.id || Date.now()),
             roll: Number(newRoll.roll),
             color: String(newRoll.color || ''),
-            timestamp: newRoll.created_at || newRoll.timestamp || new Date().toISOString()
+            timestamp: newRoll.timestamp || newRoll.created_at || new Date().toISOString()
           });
         } catch (e) {
           console.error('Erro ao processar notificação de rodada:', e);
@@ -276,9 +276,9 @@ async function startEngine() {
         let pollRes;
         try {
           pollRes = await pgClient.query(`
-            SELECT id, roll, color, created_at as timestamp 
+            SELECT id, roll, color, timestamp 
             FROM results 
-            ORDER BY created_at DESC 
+            ORDER BY timestamp DESC 
             LIMIT 1
           `);
         } catch (e) {
