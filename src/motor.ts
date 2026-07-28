@@ -41,9 +41,10 @@ async function sendTelegramMessage(text: string) {
 // ============================================================================
 const DATABASE_URL = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/blaze';
 
+const isSslDisabled = DATABASE_URL.includes('sslmode=disable');
 const pgClient = new Client({
   connectionString: DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: isSslDisabled ? false : (process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false)
 });
 
 // ============================================================================
