@@ -42,15 +42,25 @@ const CONFIG = {
   LOOKAHEAD_MINUTES: 10, // Analisar alvos para os próximos 10 minutos
 };
 
-async function sendTelegramMessage(text: string) {
-  if (bot && TELEGRAM_CHAT_ID) {
+async function sendTelegramMessage(text: string, retries = 3) {
+  if (!bot || !TELEGRAM_CHAT_ID) {
+    console.log('\n[TELEGRAM MOCK]\n' + text.replace(/<[^>]*>?/gm, '') + '\n');
+    return;
+  }
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       await bot.sendMessage(TELEGRAM_CHAT_ID, text, { parse_mode: 'HTML' });
-    } catch (error) {
-      console.error('Erro ao enviar mensagem para o Telegram:', error);
+      return;
+    } catch (error: any) {
+      const msg = error?.message || String(error);
+      if (attempt < retries) {
+        console.warn(`⚠️ [TELEGRAM] Instabilidade na rede (${msg}). Tentativa ${attempt}/${retries}... Reenviando em 1.5s`);
+        await new Promise(res => setTimeout(res, 1500));
+      } else {
+        console.error(`❌ [TELEGRAM] Falha ao enviar mensagem após ${retries} tentativas:`, msg);
+      }
     }
-  } else {
-    console.log('\n[TELEGRAM MOCK]\n' + text.replace(/<[^>]*>?/gm, '') + '\n');
   }
 }
 
