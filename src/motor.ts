@@ -84,9 +84,16 @@ const announcedConfirmedSignals = new Set<string>();
 const announcedTargetMinutes = new Set<string>(); // Evita re-anunciar o mesmo minuto alvo várias vezes com subconjuntos
 const cancelledPreAlerts = new Set<string>();
 
+interface TargetMinDetail {
+  min: number;
+  score: number;
+  winrate6h: number;
+}
+
 interface PendingPreAlert {
   signalKey: string;
   targetMins: number[];
+  minDetails: TargetMinDetail[];
   displayMinStr: string;
   windowStr: string;
   minPrev: number;
@@ -101,6 +108,7 @@ const pendingPreAlerts = new Map<string, PendingPreAlert>();
 interface ActiveSignal {
   id: string;
   targetMins: number[];
+  minDetails: TargetMinDetail[];
   displayMinStr: string;
   windowStr: string;
   minPrev: number;
@@ -113,6 +121,71 @@ interface ActiveSignal {
 }
 
 const activeSignals: ActiveSignal[] = [];
+
+function formatSignalMessage(
+  displayMinStr: string,
+  windowStr: string,
+  minDetails: TargetMinDetail[],
+  maxScore: number,
+  confWinrate: number
+): string {
+  if (minDetails.length === 1) {
+    const d = minDetails[0];
+    return (
+      `🎯 <b>SINAL CONFIRMADO — MINUTOS DA IA</b>\n\n` +
+      `⏰ <b>Minuto Alvo:</b> ${displayMinStr} <i>(${windowStr})</i>\n` +
+      `🔥 <b>Confluência:</b> ${maxScore} Estratégias\n` +
+      `📊 <b>Assertividade da confluência:</b> ${confWinrate.toFixed(1)}%\n` +
+      `🕑 <b>Assertividade do minuto em 6h:</b> ${d.winrate6h.toFixed(1)}%\n\n` +
+      `🤖 <i>Apex Machine</i>`
+    );
+  } else {
+    const detailsText = minDetails
+      .map(d => `• <b>:${String(d.min).padStart(2, '0')}</b> — Confluência: ${d.score} | Assertividade 6h: ${d.winrate6h.toFixed(1)}%`)
+      .join('\n');
+
+    return (
+      `🎯 <b>SINAL CONFIRMADO — MINUTOS DA IA</b>\n\n` +
+      `⏰ <b>Minutos Alvo:</b> ${displayMinStr} <i>(${windowStr})</i>\n\n` +
+      `📊 <b>Detalhamento por Minuto:</b>\n` +
+      `${detailsText}\n\n` +
+      `🔥 <b>Assertividade Geral da Confluência:</b> ${confWinrate.toFixed(1)}%\n\n` +
+      `🤖 <i>Apex Machine</i>`
+    );
+  }
+}
+
+function formatPreAlertMessage(
+  displayMinStr: string,
+  windowStr: string,
+  minDetails: TargetMinDetail[],
+  maxScore: number
+): string {
+  if (minDetails.length === 1) {
+    return (
+      `👀 <b>ATENÇÃO — OPORTUNIDADE EM DETECÇÃO</b>\n\n` +
+      `⚡ <b>A IA identificou um padrão se formando para os próximos minutos!</b>\n` +
+      `⏰ <b>Minuto Alvo Previsto:</b> ${displayMinStr} <i>(${windowStr})</i>\n` +
+      `🔥 <b>Confluência Atual:</b> ${maxScore} Estratégias\n\n` +
+      `⏳ <i>Aguarde a confirmação final faltando 2 minutos...</i>\n\n` +
+      `🤖 <i>Apex Machine</i>`
+    );
+  } else {
+    const detailsText = minDetails
+      .map(d => `• <b>:${String(d.min).padStart(2, '0')}</b> — Confluência Atual: ${d.score} | Assertividade 6h: ${d.winrate6h.toFixed(1)}%`)
+      .join('\n');
+
+    return (
+      `👀 <b>ATENÇÃO — OPORTUNIDADE EM DETECÇÃO</b>\n\n` +
+      `⚡ <b>A IA identificou um padrão se formando para os próximos minutos!</b>\n` +
+      `⏰ <b>Minutos Alvo Previstos:</b> ${displayMinStr} <i>(${windowStr})</i>\n\n` +
+      `📊 <b>Detalhamento por Minuto:</b>\n` +
+      `${detailsText}\n\n` +
+      `⏳ <i>Aguarde a confirmação final faltando 2 minutos...</i>\n\n` +
+      `🤖 <i>Apex Machine</i>`
+    );
+  }
+}
 
 let placarDiario = {
   wins: 0,
@@ -160,7 +233,7 @@ async function processNewRoll(roll: RollData) {
   for (const sig of activeSignals) {
     if (sig.status !== 'pending') continue;
 
-    // Se o roll caiu exatamente nos minutos autorizados da janela unificada
+    // Se o roll caiu exatamente nos minutos autorizados da janela unificada (começo, meio ou fim)
     if (sig.allowedMinutes.includes(rollMin)) {
       if (isWhite) {
         sig.status = 'win';
@@ -228,22 +301,28 @@ async function processNewRoll(roll: RollData) {
         announcedConfirmedSignals.add(key);
         pendingPreAlerts.delete(key);
 
-        for (const m of pa.targetMins) {
+        for (const m of pa.allowedMinutes) {
           const tHk = Math.floor(pa.targetTime / 3600000);
           announcedTargetMinutes.add(`${tHk}_${m}`);
         }
 
         const confStat = iaResult.stats.find(s => s.conf === currentMaxScore);
         const confWinrate = confStat ? confStat.winRate : (iaResult.stats.find(s => s.conf === CONFIG.MIN_CONFLUENCIA)?.winRate || 0);
-        const minutoWinrate6h = iaResult.currentHourTracker12h.getMinutePct(pa.targetMins[0], currentHourKey, 6, true);
 
-        const alertText =
-          `🎯 <b>SINAL CONFIRMADO — MINUTOS DA IA</b>\n\n` +
-          `⏰ <b>Minuto Alvo:</b> ${pa.displayMinStr} <i>(${pa.windowStr})</i>\n` +
-          `🔥 <b>Confluência:</b> ${currentMaxScore} Estratégias\n` +
-          `📊 <b>Assertividade da confluência:</b> ${confWinrate.toFixed(1)}%\n` +
-          `🕑 <b>Assertividade do minuto em 6h:</b> ${minutoWinrate6h.toFixed(1)}%\n\n` +
-          `🤖 <i>Apex Machine</i>`;
+        // Reatualiza detalhes de cada minuto no momento da confirmação
+        const updatedDetails: TargetMinDetail[] = pa.targetMins.map(m => ({
+          min: m,
+          score: iaResult.scores[m],
+          winrate6h: iaResult.currentHourTracker12h.getMinutePct(m, currentHourKey, 6, true)
+        }));
+
+        const alertText = formatSignalMessage(
+          pa.displayMinStr,
+          pa.windowStr,
+          updatedDetails,
+          currentMaxScore,
+          confWinrate
+        );
 
         await sendTelegramMessage(alertText);
         console.log(`[SINAL CONFIRMADO ENVIADO] Minutos ${pa.displayMinStr} | Conf: ${currentMaxScore}`);
@@ -251,6 +330,7 @@ async function processNewRoll(roll: RollData) {
         activeSignals.push({
           id: key,
           targetMins: pa.targetMins,
+          minDetails: updatedDetails,
           displayMinStr: pa.displayMinStr,
           windowStr: pa.windowStr,
           minPrev: pa.minPrev,
@@ -294,7 +374,7 @@ async function processNewRoll(roll: RollData) {
     const targetHourKey = Math.floor(targetTime / 3600000);
     const score = iaResult.scores[targetMin];
 
-    // Trava de Deduplicação: se este minuto já foi anunciado em qualquer sinal prévio deste ciclo, ignora
+    // Trava de Deduplicação: se este minuto (ou janela) já foi anunciado neste ciclo, ignora
     if (announcedTargetMinutes.has(`${targetHourKey}_${targetMin}`)) continue;
 
     const windowStartMin = (targetMin - 1 + 60) % 60;
@@ -348,6 +428,13 @@ async function processNewRoll(roll: RollData) {
       currM = (currM + 1) % 60;
     }
 
+    // Detalhamento por Minuto
+    const minDetails: TargetMinDetail[] = mins.map(m => ({
+      min: m,
+      score: iaResult.scores[m],
+      winrate6h: iaResult.currentHourTracker12h.getMinutePct(m, currentHourKey, 6, true)
+    }));
+
     let displayMinStr = '';
     if (mins.length === 1) {
       displayMinStr = `:${String(firstMin).padStart(2, '0')}`;
@@ -365,7 +452,7 @@ async function processNewRoll(roll: RollData) {
     // FASE 1: Pré-Alerta de Atenção (Faltando 3 a 7 minutos)
     if (minOffset >= 3 && minOffset <= 7 && !announcedPreAlerts.has(signalKey)) {
       announcedPreAlerts.add(signalKey);
-      for (const m of mins) {
+      for (const m of allowedMinutes) {
         const tHk = Math.floor(firstTargetTime / 3600000);
         announcedTargetMinutes.add(`${tHk}_${m}`);
       }
@@ -373,6 +460,7 @@ async function processNewRoll(roll: RollData) {
       pendingPreAlerts.set(signalKey, {
         signalKey,
         targetMins: mins,
+        minDetails,
         displayMinStr,
         windowStr,
         minPrev,
@@ -382,13 +470,12 @@ async function processNewRoll(roll: RollData) {
         maxTargetTime: lastTargetTime
       });
 
-      const preAlertText =
-        `👀 <b>ATENÇÃO — OPORTUNIDADE EM DETECÇÃO</b>\n\n` +
-        `⚡ <b>A IA identificou um padrão se formando para os próximos minutos!</b>\n` +
-        `⏰ <b>Minutos Alvo:</b> ${displayMinStr} <i>(${windowStr})</i>\n` +
-        `🔥 <b>Confluência Atual:</b> ${maxScore} Estratégias\n\n` +
-        `⏳ <i>Aguarde a confirmação final faltando 2 minutos...</i>\n\n` +
-        `🤖 <i>Apex Machine</i>`;
+      const preAlertText = formatPreAlertMessage(
+        displayMinStr,
+        windowStr,
+        minDetails,
+        maxScore
+      );
 
       await sendTelegramMessage(preAlertText);
       console.log(`[PRÉ-ALERTA ENVIADO] Minutos ${displayMinStr} | Offset: ${minOffset}m`);
@@ -397,22 +484,21 @@ async function processNewRoll(roll: RollData) {
     // FASE 2: Sinal Oficial Confirmado Direto (se gerado com 2 min ou menos de antecedência)
     if (minOffset <= 2 && !announcedConfirmedSignals.has(signalKey) && !cancelledPreAlerts.has(signalKey)) {
       announcedConfirmedSignals.add(signalKey);
-      for (const m of mins) {
+      for (const m of allowedMinutes) {
         const tHk = Math.floor(firstTargetTime / 3600000);
         announcedTargetMinutes.add(`${tHk}_${m}`);
       }
 
       const confStat = iaResult.stats.find(s => s.conf === maxScore);
       const confWinrate = confStat ? confStat.winRate : (iaResult.stats.find(s => s.conf === CONFIG.MIN_CONFLUENCIA)?.winRate || 0);
-      const minutoWinrate6h = iaResult.currentHourTracker12h.getMinutePct(firstMin, currentHourKey, 6, true);
 
-      const alertText = 
-        `🎯 <b>SINAL CONFIRMADO — MINUTOS DA IA</b>\n\n` +
-        `⏰ <b>Minuto Alvo:</b> ${displayMinStr} <i>(${windowStr})</i>\n` +
-        `🔥 <b>Confluência:</b> ${maxScore} Estratégias\n` +
-        `📊 <b>Assertividade da confluência:</b> ${confWinrate.toFixed(1)}%\n` +
-        `🕑 <b>Assertividade do minuto em 6h:</b> ${minutoWinrate6h.toFixed(1)}%\n\n` +
-        `🤖 <i>Apex Machine</i>`;
+      const alertText = formatSignalMessage(
+        displayMinStr,
+        windowStr,
+        minDetails,
+        maxScore,
+        confWinrate
+      );
 
       await sendTelegramMessage(alertText);
       console.log(`[SINAL CONFIRMADO ENVIADO] Minutos ${displayMinStr} | Conf: ${maxScore}`);
@@ -420,6 +506,7 @@ async function processNewRoll(roll: RollData) {
       activeSignals.push({
         id: signalKey,
         targetMins: mins,
+        minDetails,
         displayMinStr,
         windowStr,
         minPrev,
