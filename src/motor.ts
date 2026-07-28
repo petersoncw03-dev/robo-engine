@@ -217,13 +217,22 @@ async function startEngine() {
     console.log('✅ Conectado ao PostgreSQL com sucesso.');
 
     // Carga Inicial: Puxa 240 horas (10 dias) para alimentar o filtro Macro de 72h com Warmup completo
-    console.log('📥 Carregando histórico inicial do PostgreSQL (240h / 10 dias)...');
-    const res = await pgClient.query(`
-      SELECT id, roll, color, created_at as timestamp 
-      FROM results 
-      WHERE created_at >= NOW() - INTERVAL '240 hours'
-      ORDER BY created_at ASC
-    `);
+    console.log('📥 [ROBO ENGINE] Carregando histórico inicial do PostgreSQL (240h / 10 dias)...');
+    let res;
+    try {
+      res = await pgClient.query(`
+        SELECT id, roll, color, created_at as timestamp 
+        FROM results 
+        WHERE created_at >= NOW() - INTERVAL '240 hours'
+        ORDER BY created_at ASC
+      `);
+    } catch (e) {
+      res = await pgClient.query(`
+        SELECT id, roll, color, timestamp 
+        FROM results 
+        ORDER BY id ASC
+      `);
+    }
 
     if (res.rows && res.rows.length > 0) {
       for (const row of res.rows) {
@@ -231,18 +240,22 @@ async function startEngine() {
           id: String(row.id),
           roll: Number(row.roll),
           color: String(row.color || ''),
-          timestamp: row.timestamp
+          timestamp: row.timestamp || new Date().toISOString()
         });
       }
-      console.log(`✅ ${history.length} rodadas carregadas no histórico inicial.`);
+      console.log(`✅ [ROBO ENGINE] ${history.length} rodadas carregadas no histórico inicial.`);
     }
 
-    // Escutar rodadas em tempo real via LISTEN / NOTIFY ou Polling de segurança
+    // Escutar rodadas em tempo real nos dois canais possíveis (nova_pedra e new_roll)
+    await pgClient.query('LISTEN nova_pedra');
     await pgClient.query('LISTEN new_roll');
+    console.log('📢 [ROBO ENGINE] Escutando canais LISTEN: nova_pedra e new_roll');
+
     pgClient.on('notification', async (msg) => {
       if (msg.payload) {
         try {
           const newRoll = JSON.parse(msg.payload);
+          console.log(`📢 [ROBO ENGINE] Nova pedra via NOTIFY (${msg.channel}):`, newRoll.roll || newRoll);
           await processNewRoll({
             id: String(newRoll.id || Date.now()),
             roll: Number(newRoll.roll),
@@ -260,12 +273,22 @@ async function startEngine() {
 
     setInterval(async () => {
       try {
-        const pollRes = await pgClient.query(`
-          SELECT id, roll, color, created_at as timestamp 
-          FROM results 
-          ORDER BY created_at DESC 
-          LIMIT 1
-        `);
+        let pollRes;
+        try {
+          pollRes = await pgClient.query(`
+            SELECT id, roll, color, created_at as timestamp 
+            FROM results 
+            ORDER BY created_at DESC 
+            LIMIT 1
+          `);
+        } catch (e) {
+          pollRes = await pgClient.query(`
+            SELECT id, roll, color, timestamp 
+            FROM results 
+            ORDER BY id DESC 
+            LIMIT 1
+          `);
+        }
 
         if (pollRes.rows && pollRes.rows.length > 0) {
           const latest = pollRes.rows[0];
@@ -276,7 +299,7 @@ async function startEngine() {
               id: latestId,
               roll: Number(latest.roll),
               color: String(latest.color || ''),
-              timestamp: latest.timestamp
+              timestamp: latest.timestamp || new Date().toISOString()
             });
           }
         }
