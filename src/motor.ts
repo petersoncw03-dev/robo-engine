@@ -15,7 +15,7 @@ const bot = TELEGRAM_TOKEN ? new TelegramBot(TELEGRAM_TOKEN, { polling: false })
 
 // Configuração Operacional dos Filtros da IA (Conforme Especificação)
 const CONFIG = {
-  MIN_CONFLUENCIA: Number(process.env.MIN_CONFLUENCIA || 3), // Confluência Mínima (ex: 3+)
+  MIN_CONFLUENCIA: Number(process.env.MIN_CONFLUENCIA || 1), // 1 = Todas as confluências (1+)
   MICRO_FILTER: { enabled: true, minWr: 20, maxWr: 100, hours: 1 }, // 1h, 20% a 100%
   MACRO_FILTER: { enabled: true, minWr: 30, maxWr: 100, hours: 72 }, // 72h, 30% a 100%
   MINUTO_FILTER: { enabled: true, minWr: 40, maxWr: 100, hours: 3 }, // 3h, 40% a 100%
