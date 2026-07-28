@@ -77,6 +77,7 @@ interface ActiveSignal {
   targetMin: number;
   minPrev: number;
   minNext: number;
+  targetTime: number;
   announcedTime: number;
   targetHourKey: number;
   score: number;
@@ -129,36 +130,36 @@ async function processNewRoll(roll: RollData) {
   for (const sig of activeSignals) {
     if (sig.status !== 'pending') continue;
 
-    // Verificar se o roll atual pertence à janela {M-1, M, M+1} do sinal
-    const diffMin = Math.abs(rollMin - sig.targetMin);
-    const inWindow = diffMin <= 1 || diffMin >= 59; // Wraparound minuto 0/59
+    const windowStart = sig.targetTime - 1.5 * 60_000;
+    const windowEnd = sig.targetTime + 1.5 * 60_000;
 
-    if (inWindow && isWhite) {
-      sig.status = 'win';
-      placarDiario.wins++;
-      const targetMinStr = String(sig.targetMin).padStart(2, '0');
-      await sendTelegramMessage(
-        `✅ <b>GREEN NO BRANCO! ⚪ (14X)</b>\n` +
-        `🎯 Minuto Alvo: :${targetMinStr}\n\n` +
-        `🤖 <i>Apex Machine</i>`
-      );
-      console.log(`[GREEN] Sinal no minuto :${targetMinStr} acertou Branco!`);
-      continue;
-    }
-
-    // Se passou do tempo máximo da janela (+2min do minuto alvo), expira como LOSS
-    if (rollTime > (sig.announcedTime + 4 * 60_000) && !inWindow) {
-      if (sig.status === 'pending') {
-        sig.status = 'loss';
-        placarDiario.losses++;
+    // Se estamos dentro da janela do sinal ({M-1, M, M+1})
+    if (rollTime >= windowStart && rollTime <= windowEnd) {
+      if (isWhite) {
+        sig.status = 'win';
+        placarDiario.wins++;
         const targetMinStr = String(sig.targetMin).padStart(2, '0');
         await sendTelegramMessage(
-          `❌ <b>LOSS</b>\n` +
+          `✅ <b>GREEN NO BRANCO! ⚪ (14X)</b>\n` +
           `🎯 Minuto Alvo: :${targetMinStr}\n\n` +
           `🤖 <i>Apex Machine</i>`
         );
-        console.log(`[LOSS] Sinal no minuto :${targetMinStr} encerrou sem Branco.`);
+        console.log(`[GREEN] Sinal no minuto :${targetMinStr} acertou Branco!`);
+        continue;
       }
+    }
+
+    // Se a janela PASSOU COMPLETAMENTE (> M+1) e não deu win -> LOSS!
+    if (rollTime > windowEnd) {
+      sig.status = 'loss';
+      placarDiario.losses++;
+      const targetMinStr = String(sig.targetMin).padStart(2, '0');
+      await sendTelegramMessage(
+        `❌ <b>LOSS</b>\n` +
+        `🎯 Minuto Alvo: :${targetMinStr}\n\n` +
+        `🤖 <i>Apex Machine</i>`
+      );
+      console.log(`[LOSS] Sinal no minuto :${targetMinStr} encerrou sem Branco.`);
     }
   }
 
@@ -234,6 +235,7 @@ async function processNewRoll(roll: RollData) {
           targetMin,
           minPrev: (targetMin - 1 + 60) % 60,
           minNext: (targetMin + 1) % 60,
+          targetTime,
           announcedTime: rollTime,
           targetHourKey: currentHourKey,
           score,
