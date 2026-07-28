@@ -33,7 +33,7 @@ const bot = TELEGRAM_TOKEN ? new TelegramBot(TELEGRAM_TOKEN, { polling: false })
 
 // Configuração Operacional dos Filtros da IA (Conforme Especificação)
 const CONFIG = {
-  MIN_CONFLUENCIA: Number(process.env.MIN_CONFLUENCIA || 1), // 1 = Todas as confluências (1+)
+  MIN_CONFLUENCIA: Number(process.env.MIN_CONFLUENCIA || 2), // 2 = Filtro padrão de confluência para alta assertividade
   MICRO_FILTER: { enabled: true, minWr: 20, maxWr: 100, hours: 1 }, // 1h, 20% a 100%
   MACRO_FILTER: { enabled: true, minWr: 30, maxWr: 100, hours: 72 }, // 72h, 30% a 100%
   MINUTO_FILTER: { enabled: true, minWr: 40, maxWr: 100, hours: 3 }, // 3h, 40% a 100%
@@ -81,26 +81,32 @@ const pgClient = new Client({
 const history: RollData[] = [];
 const announcedPreAlerts = new Set<string>();
 const announcedConfirmedSignals = new Set<string>();
+const cancelledPreAlerts = new Set<string>();
 
 interface PendingPreAlert {
   signalKey: string;
-  targetMin: number;
-  targetTime: number;
+  targetMins: number[];
+  displayMinStr: string;
+  windowStr: string;
   minPrev: number;
   minNext: number;
+  allowedMinutes: number[];
+  targetTime: number;
+  maxTargetTime: number;
 }
 
 const pendingPreAlerts = new Map<string, PendingPreAlert>();
-const cancelledPreAlerts = new Set<string>();
 
 interface ActiveSignal {
   id: string;
-  targetMin: number;
+  targetMins: number[];
+  displayMinStr: string;
+  windowStr: string;
   minPrev: number;
   minNext: number;
+  allowedMinutes: number[];
   targetTime: number;
-  announcedTime: number;
-  targetHourKey: number;
+  endTime: number; // Epoch timestamp onde a janela termina e o LOSS deve ser declarado se nenhum branco caiu
   score: number;
   status: 'pending' | 'win' | 'loss';
 }
@@ -147,48 +153,35 @@ async function processNewRoll(roll: RollData) {
   const rollMin = new Date(roll.timestamp).getMinutes();
   const isWhite = Number(roll.roll) === 0;
 
-  // Helper: verifica se o minuto atual já passou da janela do sinal ({M-1, M, M+1})
-  const isMinutePastWindow = (rMin: number, tMin: number, nMin: number, rTime: number, tTime: number): boolean => {
-    if (rTime > tTime + 2.5 * 60_000) return true; // Segurança por tempo absoluto
-    if (nMin === 0) return rMin > 0 && rMin < (tMin - 1 + 60) % 60;
-    if (nMin === 1) return rMin > 1 && rMin < (tMin - 1 + 60) % 60;
-    return rMin > nMin;
-  };
-
   // 1. Acompanhar e Resolver Sinais Ativos Pendentes
   for (const sig of activeSignals) {
     if (sig.status !== 'pending') continue;
 
-    const allowedMinutes = [sig.minPrev, sig.targetMin, sig.minNext];
-
-    // Se o roll caiu exatamente nos minutos autorizados (:17, :18, :19)
-    if (allowedMinutes.includes(rollMin)) {
+    // Se o roll caiu exatamente nos minutos autorizados da janela unificada
+    if (sig.allowedMinutes.includes(rollMin)) {
       if (isWhite) {
         sig.status = 'win';
         placarDiario.wins++;
-        const targetMinStr = String(sig.targetMin).padStart(2, '0');
-        const rollMinStr = String(rollMin).padStart(2, '0');
         await sendTelegramMessage(
           `✅ <b>GREEN NO BRANCO! ⚪ (14X)</b>\n` +
-          `🎯 Minuto Alvo: :${targetMinStr}\n\n` +
+          `🎯 Minuto Alvo: ${sig.displayMinStr}\n\n` +
           `🤖 <i>Apex Machine</i>`
         );
-        console.log(`[GREEN] Sinal no minuto :${targetMinStr} acertou Branco no minuto :${rollMinStr}!`);
+        console.log(`[GREEN] Sinal ${sig.displayMinStr} acertou Branco no minuto :${String(rollMin).padStart(2, '0')}!`);
         continue;
       }
     }
 
-    // Se o relógio já passou por completo do minuto final (ex: virou :20) -> LOSS!
-    if (isMinutePastWindow(rollMin, sig.targetMin, sig.minNext, rollTime, sig.targetTime)) {
+    // Se o tempo da pedra passou por completo do encerramento da janela (sig.endTime) -> LOSS!
+    if (rollTime >= sig.endTime) {
       sig.status = 'loss';
       placarDiario.losses++;
-      const targetMinStr = String(sig.targetMin).padStart(2, '0');
       await sendTelegramMessage(
         `❌ <b>LOSS</b>\n` +
-        `🎯 Minuto Alvo: :${targetMinStr}\n\n` +
+        `🎯 Minuto Alvo: ${sig.displayMinStr}\n\n` +
         `🤖 <i>Apex Machine</i>`
       );
-      console.log(`[LOSS] Sinal no minuto :${targetMinStr} encerrou sem Branco.`);
+      console.log(`[LOSS] Sinal ${sig.displayMinStr} encerrou sem Branco.`);
     }
   }
 
@@ -215,44 +208,43 @@ async function processNewRoll(roll: RollData) {
       continue;
     }
 
-    const currentScore = iaResult.scores[pa.targetMin];
-    const targetMinStr = String(pa.targetMin).padStart(2, '0');
-    const minPrevStr = String(pa.minPrev).padStart(2, '0');
-    const minNextStr = String(pa.minNext).padStart(2, '0');
-
-    // Faltando 2 minutos ou menos (ou se a janela M-1 acabou de começar)
-    const isTimeToConfirm = (pa.targetTime - rollTime) <= 2.5 * 60_000 || rollMin === pa.minPrev;
+    // Faltando 2.5 minutos ou menos para o início da janela de entrada
+    const isTimeToConfirm = (pa.targetTime - 60_000 - rollTime) <= 2.5 * 60_000 || rollMin === pa.minPrev;
 
     if (isTimeToConfirm) {
-      if (currentScore >= CONFIG.MIN_CONFLUENCIA && rollMin !== pa.minPrev && rollMin !== pa.targetMin) {
+      const currentMaxScore = Math.max(...pa.targetMins.map(m => iaResult.scores[m]));
+
+      if (currentMaxScore >= CONFIG.MIN_CONFLUENCIA && !pa.allowedMinutes.includes(rollMin)) {
         // CONFIRMAR SINAL
         announcedConfirmedSignals.add(key);
         pendingPreAlerts.delete(key);
 
-        const confStat = iaResult.stats.find(s => s.conf === currentScore);
+        const confStat = iaResult.stats.find(s => s.conf === currentMaxScore);
         const confWinrate = confStat ? confStat.winRate : (iaResult.stats.find(s => s.conf === CONFIG.MIN_CONFLUENCIA)?.winRate || 0);
-        const minutoWinrate6h = iaResult.currentHourTracker12h.getMinutePct(pa.targetMin, currentHourKey, 6, true);
+        const minutoWinrate6h = iaResult.currentHourTracker12h.getMinutePct(pa.targetMins[0], currentHourKey, 6, true);
 
         const alertText =
           `🎯 <b>SINAL CONFIRMADO — MINUTOS DA IA</b>\n\n` +
-          `⏰ <b>Minuto Alvo:</b> :${targetMinStr} <i>(Entrar no :${minPrevStr}, :${targetMinStr} e :${minNextStr})</i>\n` +
-          `🔥 <b>Confluência:</b> ${currentScore} Estratégias\n` +
+          `⏰ <b>Minuto Alvo:</b> ${pa.displayMinStr} <i>(${pa.windowStr})</i>\n` +
+          `🔥 <b>Confluência:</b> ${currentMaxScore} Estratégias\n` +
           `📊 <b>Assertividade da confluência:</b> ${confWinrate.toFixed(1)}%\n` +
           `🕑 <b>Assertividade do minuto em 6h:</b> ${minutoWinrate6h.toFixed(1)}%\n\n` +
           `🤖 <i>Apex Machine</i>`;
 
         await sendTelegramMessage(alertText);
-        console.log(`[SINAL CONFIRMADO ENVIADO] Minuto :${targetMinStr} | Conf: ${currentScore}`);
+        console.log(`[SINAL CONFIRMADO ENVIADO] Minutos ${pa.displayMinStr} | Conf: ${currentMaxScore}`);
 
         activeSignals.push({
           id: key,
-          targetMin: pa.targetMin,
+          targetMins: pa.targetMins,
+          displayMinStr: pa.displayMinStr,
+          windowStr: pa.windowStr,
           minPrev: pa.minPrev,
           minNext: pa.minNext,
+          allowedMinutes: pa.allowedMinutes,
           targetTime: pa.targetTime,
-          announcedTime: rollTime,
-          targetHourKey: currentHourKey,
-          score: currentScore,
+          endTime: pa.maxTargetTime + 2 * 60_000,
+          score: currentMaxScore,
           status: 'pending'
         });
       } else {
@@ -262,17 +254,26 @@ async function processNewRoll(roll: RollData) {
 
         const cancelText =
           `⚠️ <b>OPORTUNIDADE CANCELADA</b>\n\n` +
-          `📉 <b>Minuto Alvo Previsto:</b> :${targetMinStr}\n` +
+          `📉 <b>Minuto Alvo Previsto:</b> ${pa.displayMinStr}\n` +
           `ℹ️ <i>A confluência oscilou antes da entrada. Entrada ABORTADA por segurança!</i>\n\n` +
           `🤖 <i>Apex Machine</i>`;
 
         await sendTelegramMessage(cancelText);
-        console.log(`[OPORTUNIDADE CANCELADA ENVIADA] Minuto :${targetMinStr}`);
+        console.log(`[OPORTUNIDADE CANCELADA ENVIADA] Minutos ${pa.displayMinStr}`);
       }
     }
   }
 
-  // 4. Analisar alvos para os próximos minutos
+  // 4. Analisar alvos para os próximos minutos e Agrupar Minutos Consecutivos
+  interface EligibleMinute {
+    targetMin: number;
+    targetTime: number;
+    score: number;
+    offset: number;
+  }
+
+  const eligibleMinutes: EligibleMinute[] = [];
+
   for (let offset = 1; offset <= CONFIG.LOOKAHEAD_MINUTES; offset++) {
     const targetTime = rollTime + offset * 60_000;
     const targetMin = new Date(targetTime).getMinutes();
@@ -283,65 +284,125 @@ async function processNewRoll(roll: RollData) {
     if (isAlreadyInOrPastWindow) continue;
 
     if (score >= CONFIG.MIN_CONFLUENCIA) {
-      const signalKey = `${currentHourKey}_${targetMin}`;
-      const targetMinStr = String(targetMin).padStart(2, '0');
-      const minPrevStr = String((targetMin - 1 + 60) % 60).padStart(2, '0');
-      const minNextStr = String((targetMin + 1) % 60).padStart(2, '0');
-
-      // FASE 1: Pré-Alerta de Atenção (Faltando 3 a 7 minutos)
-      if (offset >= 3 && offset <= 7 && !announcedPreAlerts.has(signalKey)) {
-        announcedPreAlerts.add(signalKey);
-        pendingPreAlerts.set(signalKey, {
-          signalKey,
-          targetMin,
-          targetTime,
-          minPrev: (targetMin - 1 + 60) % 60,
-          minNext: (targetMin + 1) % 60
-        });
-
-        const preAlertText =
-          `👀 <b>ATENÇÃO — OPORTUNIDADE EM DETECÇÃO</b>\n\n` +
-          `⚡ <b>A IA identificou um padrão se formando para os próximos minutos!</b>\n` +
-          `⏰ <b>Minuto Alvo Previsto:</b> :${targetMinStr} <i>(Janela :${minPrevStr}, :${targetMinStr} e :${minNextStr})</i>\n` +
-          `🔥 <b>Confluência Atual:</b> ${score} Estratégias\n\n` +
-          `⏳ <i>Aguarde a confirmação final faltando 2 minutos...</i>\n\n` +
-          `🤖 <i>Apex Machine</i>`;
-
-        await sendTelegramMessage(preAlertText);
-        console.log(`[PRÉ-ALERTA ENVIADO] Minuto :${targetMinStr} | Offset: ${offset}m`);
+      const minWr = iaResult.currentHourTracker12h.getMinutePct(targetMin, currentHourKey, CONFIG.MINUTO_FILTER.hours, true);
+      if (minWr >= CONFIG.MINUTO_FILTER.minWr) {
+        eligibleMinutes.push({ targetMin, targetTime, score, offset });
       }
+    }
+  }
 
-      // FASE 2: Sinal Oficial Confirmado Direto (se gerado com 2 min ou menos de antecedência)
-      if (offset <= 2 && !announcedConfirmedSignals.has(signalKey) && !cancelledPreAlerts.has(signalKey)) {
-        announcedConfirmedSignals.add(signalKey);
+  // Agrupar minutos consecutivos em Clusters (ex: [59, 0] ou [1, 2, 3])
+  const clusters: EligibleMinute[][] = [];
+  if (eligibleMinutes.length > 0) {
+    let currentCluster: EligibleMinute[] = [eligibleMinutes[0]];
 
-        const confStat = iaResult.stats.find(s => s.conf === score);
-        const confWinrate = confStat ? confStat.winRate : (iaResult.stats.find(s => s.conf === CONFIG.MIN_CONFLUENCIA)?.winRate || 0);
-        const minutoWinrate6h = iaResult.currentHourTracker12h.getMinutePct(targetMin, currentHourKey, 6, true);
+    for (let i = 1; i < eligibleMinutes.length; i++) {
+      const prev = currentCluster[currentCluster.length - 1];
+      const curr = eligibleMinutes[i];
 
-        const alertText = 
-          `🎯 <b>SINAL CONFIRMADO — MINUTOS DA IA</b>\n\n` +
-          `⏰ <b>Minuto Alvo:</b> :${targetMinStr} <i>(Entrar no :${minPrevStr}, :${targetMinStr} e :${minNextStr})</i>\n` +
-          `🔥 <b>Confluência:</b> ${score} Estratégias\n` +
-          `📊 <b>Assertividade da confluência:</b> ${confWinrate.toFixed(1)}%\n` +
-          `🕑 <b>Assertividade do minuto em 6h:</b> ${minutoWinrate6h.toFixed(1)}%\n\n` +
-          `🤖 <i>Apex Machine</i>`;
+      const isConsecutive = (curr.targetMin === (prev.targetMin + 1) % 60) && ((curr.targetTime - prev.targetTime) <= 90_000);
 
-        await sendTelegramMessage(alertText);
-        console.log(`[SINAL CONFIRMADO ENVIADO] Minuto :${targetMinStr} | Conf: ${score} | MinWr: ${minutoWinrate6h.toFixed(1)}%`);
-
-        activeSignals.push({
-          id: signalKey,
-          targetMin,
-          minPrev: (targetMin - 1 + 60) % 60,
-          minNext: (targetMin + 1) % 60,
-          targetTime,
-          announcedTime: rollTime,
-          targetHourKey: currentHourKey,
-          score,
-          status: 'pending'
-        });
+      if (isConsecutive) {
+        currentCluster.push(curr);
+      } else {
+        clusters.push(currentCluster);
+        currentCluster = [curr];
       }
+    }
+    clusters.push(currentCluster);
+  }
+
+  // Processar cada Cluster
+  for (const cluster of clusters) {
+    const mins = cluster.map(item => item.targetMin);
+    const firstMin = mins[0];
+    const lastMin = mins[mins.length - 1];
+    const firstTargetTime = cluster[0].targetTime;
+    const lastTargetTime = cluster[cluster.length - 1].targetTime;
+    const minPrev = (firstMin - 1 + 60) % 60;
+    const minNext = (lastMin + 1) % 60;
+
+    const allowedMinutes: number[] = [];
+    let currM = minPrev;
+    while (true) {
+      allowedMinutes.push(currM);
+      if (currM === minNext) break;
+      currM = (currM + 1) % 60;
+    }
+
+    let displayMinStr = '';
+    if (mins.length === 1) {
+      displayMinStr = `:${String(firstMin).padStart(2, '0')}`;
+    } else if (mins.length === 2) {
+      displayMinStr = `:${String(firstMin).padStart(2, '0')} e :${String(lastMin).padStart(2, '0')}`;
+    } else {
+      displayMinStr = mins.map(m => `:${String(m).padStart(2, '0')}`).join(', ');
+    }
+
+    const windowStr = `Entrar do :${String(minPrev).padStart(2, '0')} ao :${String(minNext).padStart(2, '0')}`;
+    const maxScore = Math.max(...cluster.map(item => item.score));
+    const minOffset = Math.min(...cluster.map(item => item.offset));
+    const signalKey = `${currentHourKey}_${mins.join('_')}`;
+
+    // FASE 1: Pré-Alerta de Atenção (Faltando 3 a 7 minutos)
+    if (minOffset >= 3 && minOffset <= 7 && !announcedPreAlerts.has(signalKey)) {
+      announcedPreAlerts.add(signalKey);
+      pendingPreAlerts.set(signalKey, {
+        signalKey,
+        targetMins: mins,
+        displayMinStr,
+        windowStr,
+        minPrev,
+        minNext,
+        allowedMinutes,
+        targetTime: firstTargetTime,
+        maxTargetTime: lastTargetTime
+      });
+
+      const preAlertText =
+        `👀 <b>ATENÇÃO — OPORTUNIDADE EM DETECÇÃO</b>\n\n` +
+        `⚡ <b>A IA identificou um padrão se formando para os próximos minutos!</b>\n` +
+        `⏰ <b>Minutos Alvo:</b> ${displayMinStr} <i>(${windowStr})</i>\n` +
+        `🔥 <b>Confluência Atual:</b> ${maxScore} Estratégias\n\n` +
+        `⏳ <i>Aguarde a confirmação final faltando 2 minutos...</i>\n\n` +
+        `🤖 <i>Apex Machine</i>`;
+
+      await sendTelegramMessage(preAlertText);
+      console.log(`[PRÉ-ALERTA ENVIADO] Minutos ${displayMinStr} | Offset: ${minOffset}m`);
+    }
+
+    // FASE 2: Sinal Oficial Confirmado Direto (se gerado com 2 min ou menos de antecedência)
+    if (minOffset <= 2 && !announcedConfirmedSignals.has(signalKey) && !cancelledPreAlerts.has(signalKey)) {
+      announcedConfirmedSignals.add(signalKey);
+
+      const confStat = iaResult.stats.find(s => s.conf === maxScore);
+      const confWinrate = confStat ? confStat.winRate : (iaResult.stats.find(s => s.conf === CONFIG.MIN_CONFLUENCIA)?.winRate || 0);
+      const minutoWinrate6h = iaResult.currentHourTracker12h.getMinutePct(firstMin, currentHourKey, 6, true);
+
+      const alertText = 
+        `🎯 <b>SINAL CONFIRMADO — MINUTOS DA IA</b>\n\n` +
+        `⏰ <b>Minuto Alvo:</b> ${displayMinStr} <i>(${windowStr})</i>\n` +
+        `🔥 <b>Confluência:</b> ${maxScore} Estratégias\n` +
+        `📊 <b>Assertividade da confluência:</b> ${confWinrate.toFixed(1)}%\n` +
+        `🕑 <b>Assertividade do minuto em 6h:</b> ${minutoWinrate6h.toFixed(1)}%\n\n` +
+        `🤖 <i>Apex Machine</i>`;
+
+      await sendTelegramMessage(alertText);
+      console.log(`[SINAL CONFIRMADO ENVIADO] Minutos ${displayMinStr} | Conf: ${maxScore}`);
+
+      activeSignals.push({
+        id: signalKey,
+        targetMins: mins,
+        displayMinStr,
+        windowStr,
+        minPrev,
+        minNext,
+        allowedMinutes,
+        targetTime: firstTargetTime,
+        endTime: lastTargetTime + 2 * 60_000,
+        score: maxScore,
+        status: 'pending'
+      });
     }
   }
 }
