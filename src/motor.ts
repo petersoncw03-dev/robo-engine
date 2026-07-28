@@ -69,7 +69,8 @@ const pgClient = new Client({
 // MEMÓRIA E ESTADO DO ROBÔ
 // ============================================================================
 const history: RollData[] = [];
-const announcedSignals = new Set<string>(); // Evita duplicar alerta do mesmo minuto/hora
+const announcedPreAlerts = new Set<string>();
+const announcedConfirmedSignals = new Set<string>();
 
 interface ActiveSignal {
   id: string;
@@ -100,7 +101,8 @@ function checkMidnightReset() {
         `🌙 <b>Resumo do Dia — Minutos da IA</b>\n\n` +
         `✅ <b>Vitórias (Brancos):</b> ${placarDiario.wins}\n` +
         `❌ <b>Derrotas:</b> ${placarDiario.losses}\n` +
-        `📈 <b>Assertividade:</b> ${wr}%`
+        `📈 <b>Assertividade:</b> ${wr}%\n\n` +
+        `🤖 <i>Apex Machine</i>`
       );
     }
     placarDiario.wins = 0;
@@ -137,7 +139,8 @@ async function processNewRoll(roll: RollData) {
       const targetMinStr = String(sig.targetMin).padStart(2, '0');
       await sendTelegramMessage(
         `✅ <b>GREEN NO BRANCO! ⚪ (14X)</b>\n` +
-        `🎯 Minuto Alvo: :${targetMinStr}`
+        `🎯 Minuto Alvo: :${targetMinStr}\n\n` +
+        `🤖 <i>Apex Machine</i>`
       );
       console.log(`[GREEN] Sinal no minuto :${targetMinStr} acertou Branco!`);
       continue;
@@ -151,7 +154,8 @@ async function processNewRoll(roll: RollData) {
         const targetMinStr = String(sig.targetMin).padStart(2, '0');
         await sendTelegramMessage(
           `❌ <b>LOSS</b>\n` +
-          `🎯 Minuto Alvo: :${targetMinStr}`
+          `🎯 Minuto Alvo: :${targetMinStr}\n\n` +
+          `🤖 <i>Apex Machine</i>`
         );
         console.log(`[LOSS] Sinal no minuto :${targetMinStr} encerrou sem Branco.`);
       }
@@ -180,16 +184,31 @@ async function processNewRoll(roll: RollData) {
     const targetMin = new Date(targetTime).getMinutes();
     const score = iaResult.scores[targetMin];
 
-    // Verifica se atinge a confluência mínima (ex: 3+)
+    // Verifica se atinge a confluência mínima
     if (score >= CONFIG.MIN_CONFLUENCIA) {
       const signalKey = `${currentHourKey}_${targetMin}`;
+      const targetMinStr = String(targetMin).padStart(2, '0');
+      const minPrevStr = String((targetMin - 1 + 60) % 60).padStart(2, '0');
+      const minNextStr = String((targetMin + 1) % 60).padStart(2, '0');
 
-      if (!announcedSignals.has(signalKey)) {
-        announcedSignals.add(signalKey);
+      // FASE 1: Pré-Alerta de Atenção (Faltando 3 a 7 minutos)
+      if (offset >= 3 && offset <= 7 && !announcedPreAlerts.has(signalKey)) {
+        announcedPreAlerts.add(signalKey);
+        const preAlertText =
+          `👀 <b>ATENÇÃO — OPORTUNIDADE EM DETECÇÃO</b>\n\n` +
+          `⚡ <b>A IA identificou um padrão se formando para os próximos minutos!</b>\n` +
+          `⏰ <b>Minuto Alvo Previsto:</b> :${targetMinStr} <i>(Janela :${minPrevStr}, :${targetMinStr} e :${minNextStr})</i>\n` +
+          `🔥 <b>Confluência Atual:</b> ${score} Estratégias\n\n` +
+          `⏳ <i>Aguarde a confirmação final faltando 2 minutos...</i>\n\n` +
+          `🤖 <i>Apex Machine</i>`;
 
-        const targetMinStr = String(targetMin).padStart(2, '0');
-        const minPrevStr = String((targetMin - 1 + 60) % 60).padStart(2, '0');
-        const minNextStr = String((targetMin + 1) % 60).padStart(2, '0');
+        await sendTelegramMessage(preAlertText);
+        console.log(`[PRÉ-ALERTA ENVIADO] Minuto :${targetMinStr} | Offset: ${offset}m`);
+      }
+
+      // FASE 2: Sinal Oficial Confirmado (Faltando 2 minutos ou menos)
+      if (offset <= 2 && !announcedConfirmedSignals.has(signalKey)) {
+        announcedConfirmedSignals.add(signalKey);
 
         // Taxa do Placar de Confluência (3h) para o score atual
         const confStat = iaResult.stats.find(s => s.conf === score);
@@ -198,16 +217,17 @@ async function processNewRoll(roll: RollData) {
         // Taxa Histórica do Minuto (:MM) nas últimas 3h com margem ±1min
         const minutoWinrate = iaResult.currentHourTracker12h.getMinutePct(targetMin, currentHourKey, CONFIG.MINUTO_FILTER.hours, true);
 
-        // FORMATO DO ALERTA TELEGRAM EXATAMENTE COMO SOLICITADO
+        // FORMATO DO SINAL CONFIRMADO COM ASSINATURA APEX MACHINE
         const alertText = 
           `🎯 <b>SINAL CONFIRMADO — MINUTOS DA IA</b>\n\n` +
           `⏰ <b>Minuto Alvo:</b> :${targetMinStr} <i>(Entrar no :${minPrevStr}, :${targetMinStr} e :${minNextStr})</i>\n` +
           `🔥 <b>Confluência:</b> ${score} Estratégias\n` +
           `📊 <b>Assertividade da confluência:</b> ${confWinrate.toFixed(1)}%\n` +
-          `🕑 <b>Assertividade do minuto:</b> ${minutoWinrate.toFixed(1)}%`;
+          `🕑 <b>Assertividade do minuto:</b> ${minutoWinrate.toFixed(1)}%\n\n` +
+          `🤖 <i>Apex Machine</i>`;
 
         await sendTelegramMessage(alertText);
-        console.log(`[ALERTA ENVIADO] Minuto :${targetMinStr} | Conf: ${score} | MinWr: ${minutoWinrate.toFixed(1)}%`);
+        console.log(`[SINAL CONFIRMADO ENVIADO] Minuto :${targetMinStr} | Conf: ${score} | MinWr: ${minutoWinrate.toFixed(1)}%`);
 
         activeSignals.push({
           id: signalKey,
